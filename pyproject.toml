@@ -1,0 +1,153 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "zephyr-ml-forge"
+version = "0.1.0"
+description = "Embedded AI Model Iteration Pipeline for Zephyr RTOS"
+license = {text = "Apache-2.0"}
+requires-python = ">=3.10"
+dependencies = [
+    "pyyaml>=6.0",
+    "pydantic>=2.0",
+    "tensorflow>=2.15.0",
+    "numpy>=1.24.0",
+    "openai>=1.0",
+    "anthropic>=0.18.0",
+    "matplotlib>=3.7.0",
+    "pandas>=2.0.0",
+    "python-dotenv>=1.0.0",
+    "rich>=13.0.0",
+    "pyserial>=3.5",
+    "west>=1.2.0",
+    "netron>=7.0.0",
+    "pydot>=2.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "black>=23.0",
+    "ruff>=0.1.0",
+]
+
+[project.scripts]
+zephyr-ml-forge = "pipeline.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["pipeline*"]
+
+[tool.black]
+line-length = 100
+target-version = ["py310"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = [
+    # tf.lite.Interpreter is deprecated upstream; the migration is tracked separately.
+    "ignore::UserWarning:tensorflow.lite.python.interpreter",
+]
+
+[tool.zephyr-ml-forge]
+# Settings for the tool itself. What the pipeline *does* is configured in
+# config/pipeline_config.yaml; these change only what it prints.
+
+# Board capabilities. A neural accelerator is a property of the hardware, not of a
+# run, so it is declared once here; config/pipeline_config.yaml only asks for it with
+# execution.npu. A board absent from this table is taken to have no accelerator.
+#
+# neutron_target is the --target passed to neutron_compiler; run
+# "neutron_compiler --show-targets" for the full list.
+
+[tool.zephyr-ml-forge.boards.frdm_mcxn947]
+accelerator = "neutron"
+neutron_target = "mcxn94x"
+
+[tool.zephyr-ml-forge.boards.mcx_n9xx_evk]
+accelerator = "neutron"
+neutron_target = "mcxn94x"
+
+[tool.zephyr-ml-forge.boards.frdm_mcxn236]
+accelerator = "neutron"
+neutron_target = "mcxn54x"
+
+[tool.zephyr-ml-forge.boards.mimxrt700_evk]
+accelerator = "neutron"
+neutron_target = "imxrt700"
+
+[tool.zephyr-ml-forge.boards.frdm_imxrt700]
+accelerator = "neutron"
+neutron_target = "imxrt700"
+
+[tool.zephyr-ml-forge.boards.qemu_cortex_m3]
+accelerator = "none"
+
+[tool.zephyr-ml-forge.output]
+# quiet   - warnings and errors only
+# normal  - progress through each iteration (default)
+# verbose - adds debug logging, including full prompts and serial traffic
+# debug   - adds TensorFlow's own output: SavedModel dumps, absl logs, warnings
+verbosity = "normal"
+
+# ML Task Description - Plain language description for the AI agent
+# This provides initial context about what the model should learn
+
+[tool.zephyr-ml-forge.task]
+description = """
+The goal is to create a small neural network that can predict an output value (y)
+given a single input value (x). The relationship between x and y is non-linear
+and follows a smooth, continuous pattern. The input values range from 0 to 2π
+(approximately 0 to 6.28), and the output values range from -1 to 1.
+
+The model should:
+- Accept a single floating-point input
+- Produce a single floating-point output
+- Be small enough to run on a microcontroller with limited RAM (<32KB)
+- Achieve low latency inference (<10ms)
+- Learn the underlying pattern from training data without being told the exact formula
+"""
+
+input_description = "A single normalized floating-point value representing a position in a cycle"
+output_description = "A single floating-point value representing the expected response at that position"
+domain = "function approximation"
+complexity_hint = "The pattern is periodic and smooth, suitable for a small neural network"
+
+[tool.zephyr-ml-forge.tasks.fashion_mnist]
+description = """
+Classify 28x28 greyscale images of clothing into ten categories: t-shirt, trouser,
+pullover, dress, coat, sandal, shirt, sneaker, bag and ankle boot.
+
+The model must:
+- Accept a 28x28x1 image with pixel values already scaled to [0, 1]
+- Produce ten class scores through a softmax output
+- Fit a microcontroller: a small convolutional stack is the right shape here, and a
+  plain fully connected network will struggle to reach the target within the parameter
+  budget
+- Keep the tensor arena within the configured size, which bounds how wide the early
+  feature maps can be
+"""
+input_description = "A 28x28x1 greyscale image, pixel values in [0, 1]"
+output_description = "Ten class scores; the highest is the predicted garment"
+domain = "image classification"
+complexity_hint = "Convolution earns its cost here; the classes differ by texture and outline, not colour"
+
+[tool.zephyr-ml-forge.tasks.mnist]
+description = """
+Classify 28x28 greyscale images of handwritten digits, 0 to 9.
+
+The model must accept a 28x28x1 image scaled to [0, 1] and produce ten class scores
+through a softmax output, within the tensor arena and parameter budget configured.
+"""
+input_description = "A 28x28x1 greyscale image, pixel values in [0, 1]"
+output_description = "Ten class scores; the highest is the predicted digit"
+domain = "image classification"
+complexity_hint = "A small convolutional stack reaches very high accuracy quickly on this set"

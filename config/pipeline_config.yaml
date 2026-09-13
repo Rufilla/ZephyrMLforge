@@ -1,0 +1,102 @@
+# Embedded AI Pipeline Configuration
+# This file is the authoritative contract for the pipeline.
+# See README.md for the fields worth knowing first, and pipeline/core/config.py for
+# every field with its own description.
+
+# Target hardware configuration
+hardware:
+  board: frdm_mcxn947/mcxn947/cpu0
+  soc: mcxn947
+  ram_kb: 512
+  flash_kb: 2048
+  tensor_arena_kb: 8        # TFLite Micro tensor arena, compiled into the firmware
+  qemu_board: qemu_cortex_m3  # frdm_mcxn947 has no QEMU support; this stands in for it
+
+# Execution unit selection
+execution:
+  cpu: true
+  npu: false
+
+# Execution environment, serial link and subprocess timeouts
+execution_environment:
+  mode: hil                 # qemu | hil | auto
+  serial_port: /dev/ttyACM0
+  serial_baud: 115200
+  flash_runner: null        # pyocd | linkserver | jlink; null uses the board default
+  build_timeout_s: 300
+  flash_timeout_s: 60
+  run_timeout_s: 30
+  qemu_timeout_s: 120
+  benchmark_runs: 100       # inferences averaged for the reported latency
+
+# Model accuracy requirements
+# For error metrics (mse, mae) lower is better, so target <= max_error.
+# For the accuracy metric higher is better, so target >= max_error and max_error
+# is the lowest accuracy still accepted.
+accuracy:
+  metric: mse
+  target: 0.01
+  max_error: 0.05
+  evaluate_on_device: false # true runs the validation set on the board over serial
+  on_device_samples: 64     # samples sent to the board when evaluate_on_device is true
+
+# Performance constraints (hard limits)
+performance:
+  max_latency_ms: 5
+  max_ram_kb: 128
+  max_flash_kb: 256
+
+# Quantization policy
+quantization:
+  allowed:
+    - int8
+  per_channel: true
+
+# AI agent configuration
+# API keys are read from environment variables:
+#   OPENAI_API_KEY for chatgpt
+#   ANTHROPIC_API_KEY for claude
+# claude_code drives a local Claude Code installation instead, needing no key.
+ai_agent:
+  provider: claude          # chatgpt | claude | claude_code | pseudo
+  model: null               # null selects the provider default
+  temperature: 0.7          # chatgpt only; claude and claude_code ignore it
+  max_tokens: 16000         # thinking is drawn from this too; ignored by claude_code
+  max_retries: 2
+  cli_path: claude          # claude_code only: the executable to run
+  cli_timeout_s: 300        # claude_code only: seconds allowed per invocation
+
+# Iteration control
+iteration:
+  max_iterations: 8
+  early_stop_on_target: true
+  allow_agent_stop: true    # the agent may end the run when further search cannot help
+
+# Host-side training hyperparameters and proposal guardrails
+training:
+  epochs: 100
+  batch_size: 32
+  early_stopping_patience: 10
+  max_parameters: 10000
+  max_layers: 10
+
+# Build configuration
+# Use /tmp to avoid symlink issues on VirtualBox shared folders
+build:
+  build_dir: /tmp/zephyr-build
+
+# Synthetic data generation
+synthetic_data:
+  task: regression          # regression | classification
+  function: sine            # sine | quadratic | step (for regression)
+  samples: 1000
+  noise_stddev: 0.1
+  train_split: 0.8
+  seed: 42
+
+# User credentials (optional)
+# Use environment variable expansion; a literal password here is never written to
+# an artefact, but it is still plaintext in a version-controlled file.
+user:
+  username: ""
+  password: "${AI_PIPELINE_PASSWORD}"

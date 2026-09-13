@@ -1,0 +1,61 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+.venv/
+ENV/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Environment and secrets
+.env
+.secrets.yaml
+*.pem
+*.key
+
+# Artifacts (tracked separately)
+artifacts/
+artifacts*
+graphs/
+
+# Zephyr build outputs
+zephyr_app/build/
+
+# TensorFlow
+*.tflite
+*.h5
+*.keras
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# West workspace (managed by setup.sh)
+zephyrproject/

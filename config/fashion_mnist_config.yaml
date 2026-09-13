@@ -1,0 +1,88 @@
+# Fashion-MNIST classification on the FRDM-MCXN947
+# A second template: real image data, a convolutional model, and an accuracy target the
+# agent has to work for. See config/pipeline_config.yaml for the field reference.
+
+hardware:
+  board: frdm_mcxn947/mcxn947/cpu0
+  soc: mcxn947
+  ram_kb: 512
+  flash_kb: 2048
+  tensor_arena_kb: 64       # 28x28 convolution activations need far more than the 8 KB
+  qemu_board: qemu_cortex_m3
+
+execution:
+  cpu: true
+  npu: false                # true compiles each model for the Neutron NPU
+
+execution_environment:
+  mode: hil
+  serial_port: /dev/ttyACM0
+  serial_baud: 115200
+  flash_runner: null
+  build_timeout_s: 600
+  flash_timeout_s: 60
+  run_timeout_s: 30
+  qemu_timeout_s: 120
+  benchmark_runs: 20        # a convolution is slower; fewer runs keep the loop brisk
+
+accuracy:
+  metric: accuracy          # higher is better, so target >= max_error
+  target: 0.90
+  max_error: 0.70           # below this the model is rejected
+  evaluate_on_device: false # 784 inputs per sample is slow over the serial link
+  on_device_samples: 16
+
+performance:
+  max_latency_ms: 50
+  max_ram_kb: 256
+  max_flash_kb: 512
+
+quantization:
+  allowed:
+    - int8
+  per_channel: true
+
+ai_agent:
+  provider: claude
+  model: null
+  temperature: 0.7
+  max_tokens: 16000         # thinking is drawn from this too
+  max_retries: 2
+  cli_path: claude
+  cli_timeout_s: 300
+
+iteration:
+  max_iterations: 6
+  early_stop_on_target: true
+  allow_agent_stop: true
+
+training:
+  epochs: 60                # early stopping ends a converged fit sooner; a cap this
+                            # low truncates deeper models and biases the search
+  batch_size: 64
+  early_stopping_patience: 4
+  max_parameters: 60000
+  max_layers: 16
+
+build:
+  build_dir: /tmp/zephyr-build
+
+dataset:
+  source: fashion_mnist     # synthetic | mnist | fashion_mnist
+  train_samples: 6000
+  val_samples: 10000        # the whole test split: at 1000 the standard error is about
+                            # one point, which is wider than the gap between the models
+                            # the agent proposes, so the ranking is decided by noise
+
+# Only the task and seed apply to an image dataset; the rest describe synthetic data.
+synthetic_data:
+  task: classification
+  function: sine
+  samples: 1000
+  noise_stddev: 0.1
+  train_split: 0.8
+  seed: 42
+
+user:
+  username: ""
+  password: "${AI_PIPELINE_PASSWORD}"
