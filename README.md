@@ -8,6 +8,13 @@ An automated model iteration pipeline for embedded systems running Zephyr RTOS. 
 agent proposes a network, the pipeline trains & quantises it, builds & runs it on a
 Cortex-M target, & feeds the measured result back into the next proposal.
 
+
+
+https://github.com/user-attachments/assets/6383cdc1-2c8c-4eb5-87e8-6c863c5d1080
+
+
+
+
 ![Pipeline](images/pipeline-simplified.png)
 
 See [`docs/program_flow.md`](docs/program_flow.md) for the full flow.
