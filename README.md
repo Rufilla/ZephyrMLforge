@@ -8,9 +8,8 @@ An automated model iteration pipeline for embedded systems running Zephyr RTOS. 
 agent proposes a network, the pipeline trains & quantises it, builds & runs it on a
 Cortex-M target, & feeds the measured result back into the next proposal.
 
+**Demo**
 https://github.com/user-attachments/assets/6383cdc1-2c8c-4eb5-87e8-6c863c5d1080
-
-See [`docs/program_flow.md`](docs/program_flow.md) for the full flow.
 
 ## What it does
 
@@ -22,6 +21,8 @@ See [`docs/program_flow.md`](docs/program_flow.md) for the full flow.
 5. **Measures** inference latency on the target, & the error of the quantised model
    with the error bar its validation set admits
 6. **Feeds back** every measurement, including failures, into the next proposal
+
+See [`docs/program_flow.md`](docs/program_flow.md) for the full flow.
 
 ## What it does not do
 
