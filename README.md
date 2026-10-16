@@ -9,6 +9,7 @@ agent proposes a network, the pipeline trains & quantises it, builds & runs it o
 Cortex-M target, & feeds the measured result back into the next proposal.
 
 **Demo**
+
 https://github.com/user-attachments/assets/6383cdc1-2c8c-4eb5-87e8-6c863c5d1080
 
 ## What it does
