@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 #
 # ZephyrMLForge Setup Script
-# Initialises the Python environment and verifies the Zephyr workspace
+# Initializes the Python environment and verifies the Zephyr workspace
 #
 # Usage: ./setup.sh
 #
 # Prerequisites:
-#   - An initialised west workspace (west init && west update), found automatically
+#   - An initialized west workspace (west init && west update), found automatically
 #     at ~/zephyrproject or /opt/zephyrproject, or named by MLFORGE_WEST_WORKSPACE
 #   - A Zephyr SDK under ~, ~/.local or /opt
 #   - Python 3.10+, cmake, ninja or make
@@ -80,9 +80,9 @@ check_zephyr_workspace() {
     log_info "Looking for a west workspace..."
 
     if ! WEST_WORKSPACE="$(find_workspace)"; then
-        log_error "No initialised west workspace found."
+        log_error "No initialized west workspace found."
         log_error "Looked at \$ZEPHYR_BASE, \$MLFORGE_WEST_WORKSPACE, ~/zephyrproject, /opt/zephyrproject"
-        log_error "Initialise one first:"
+        log_error "Initialize one first:"
         log_error "  mkdir -p ~/zephyrproject && cd ~/zephyrproject && west init && west update"
         exit 1
     fi
@@ -97,7 +97,7 @@ check_zephyr_sdk() {
 
     local sdk
     sdk=$(for candidate in "${HOME}"/zephyr-sdk-* "${HOME}"/.local/zephyr-sdk-* /opt/zephyr-sdk-*; do
-        [[ -d "${candidate}" ]] && echo "${candidate}"
+        if [[ -d "${candidate}" ]]; then echo "${candidate}"; fi
     done | sort -V | tail -1)
 
     if [[ -n "${sdk}" ]]; then

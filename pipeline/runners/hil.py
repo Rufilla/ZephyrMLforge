@@ -26,6 +26,7 @@ from pathlib import Path
 
 import numpy as np
 
+from ..core.config import DatasetSource
 from ..models.evaluation import MetricScore, evaluate_tflite, score_predictions
 from .base import ExecutionResult
 from .qemu import QEMURunner, parse_arena_used, parse_device_error, parse_latency_ms
@@ -37,6 +38,11 @@ logger = logging.getLogger(__name__)
 # Seconds allowed for the board to answer a BENCH request, which runs the whole
 # benchmark loop before it prints anything.
 BENCHMARK_REPLY_TIMEOUT_S = 20.0
+
+
+class ConstantOutputError(RuntimeError):
+    """ The model gave every sample the same output, so its score reflects
+    only how the samples' labels are distributed."""
 
 
 class HILRunner(ZephyrRunner):
@@ -51,6 +57,33 @@ class HILRunner(ZephyrRunner):
     def board(self) -> str:
         """The real target board."""
         return self.config.hardware.board
+
+    @property
+    def uses_vibration(self) -> bool:
+        """ True when the run trains on ML Vibro Sens Click recordings."""
+        return self.config.dataset.source is DatasetSource.VIBRATION
+
+    def flash_and_connect(self) -> str:
+        """ Flash the last build & wait for the board's serial port.
+
+        Returns:
+            The port the board came back on.
+
+        Raises:
+            DeviceError: the flash failed, or no port appeared in time.
+        """
+        flash_error = self._flash_device()
+        if flash_error:
+            raise DeviceError(f"Flash failed: {flash_error}")
+
+        environment = self.config.execution_environment
+        port = wait_for_serial_port(environment.serial_port, timeout_s=environment.run_timeout_s)
+        if port is None:
+            raise DeviceError(
+                f"No serial port appeared within {environment.run_timeout_s}s of flashing "
+                f"(expected {environment.serial_port})"
+            )
+        return port
 
     def run(
         self,
@@ -158,7 +191,7 @@ class HILRunner(ZephyrRunner):
 
         try:
             score = self._evaluate(link, test_data)
-        except DeviceError as error:
+        except (DeviceError, ConstantOutputError) as error:
             return ExecutionResult(
                 success=False,
                 execution_env="hil",
@@ -186,10 +219,14 @@ class HILRunner(ZephyrRunner):
 
         Raises:
             DeviceError: the board stopped answering during on-device evaluation.
+            ConstantOutputError: every sample scored on the board gave the same output.
         """
         features, labels = test_data
 
-        if not self.config.accuracy.evaluate_on_device:
+        #  An NPU model is always scored on the board. The host scores the
+        # uncompiled model, which on the FRDM-MCXN947 read 100% for a CNN whose compiled
+        # form answered every input with the same class.
+        if not (self.config.accuracy.evaluate_on_device or self.uses_neutron):
             if self._current_tflite_path is None:
                 return None
             return evaluate_tflite(
@@ -197,19 +234,27 @@ class HILRunner(ZephyrRunner):
             )
 
         # One serial round trip per sample, so the whole validation set is not used.
+        #  Spread across it rather than taken from the front: a vibration
+        # validation set is ordered by class, & its first 64 windows were 60 'off' & 4
+        # 'balanced', which a model answering 'off' to everything scored 93.75% on.
         sample_count = min(self.config.accuracy.on_device_samples, len(features))
+        indices = np.linspace(0, len(features) - 1, sample_count).round().astype(int)
         logger.info(f"Evaluating {sample_count} samples on the board")
 
         # Flattened: the firmware reads one value per input element, and an image
         # sample is (28, 28, 1) rather than a flat vector.
-        predictions = [
+        predictions = np.array([
             link.request_inference(np.asarray(features[index]).ravel().tolist())
-            for index in range(sample_count)
-        ]
+            for index in indices
+        ])
 
-        score = score_predictions(
-            np.array(predictions), labels[:sample_count], self.config.accuracy.metric
-        )
+        if sample_count > 1 and np.all(predictions == predictions[0]):
+            raise ConstantOutputError(
+                f"the model gave all {sample_count} samples the same output, "
+                f"{predictions[0].tolist()}"
+            )
+
+        score = score_predictions(predictions, labels[indices], self.config.accuracy.metric)
         logger.info(f"On-device evaluation: {self.config.accuracy.metric.value}={score}")
         return score
 

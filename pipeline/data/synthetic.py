@@ -108,7 +108,7 @@ class SyntheticDataGenerator:
         features_list = []
         labels_list = []
 
-        # Fixed, separated centres: drawing them at random sometimes placed the two
+        # Fixed, separated centers: drawing them at random sometimes placed the two
         # classes on top of each other, and no model could then reach an accuracy
         # target. Overlap is controlled by noise_stddev, as the specification intends.
         centers = [(-0.5, -0.5), (0.5, 0.5)]

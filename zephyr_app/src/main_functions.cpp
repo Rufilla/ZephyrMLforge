@@ -19,6 +19,7 @@
 #include <zephyr/console/console.h>
 #endif
 
+#include <cerrno>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -32,6 +33,10 @@
 #include <tensorflow/lite/micro/kernels/neutron/neutron.h>
 #endif
 
+#if MLFORGE_VIBRATION
+#include "vibration.h"
+#endif
+
 namespace {
 
 const tflite::Model *model = nullptr;
@@ -39,6 +44,11 @@ tflite::MicroInterpreter *interpreter = nullptr;
 TfLiteTensor *input = nullptr;
 TfLiteTensor *output = nullptr;
 bool is_ready = false;
+int inputs_loaded_since_invoke = 0;
+
+#if MLFORGE_VIBRATION
+bool is_sensor_ready = false;
+#endif
 
 alignas(16) uint8_t tensor_arena[MLFORGE_TENSOR_ARENA_SIZE];
 
@@ -48,8 +58,14 @@ constexpr int kMaxReportedOutputs = 16;
 /* Constant benchmark input: the value does not affect timing. */
 constexpr float kBenchmarkInput = 0.5f;
 
-/* Elements in one sample: every dimension but the leading batch of one. Taking only
- * the trailing dimension reports 1 for an image of (1, 28, 28, 1). */
+/**
+ * @brief Elements in one sample: every dimension but the leading batch of one.
+ *
+ * Taking only the trailing dimension would report 1 for an image of (1, 28, 28, 1).
+ *
+ * @param tensor  An input or output tensor of the interpreter.
+ * @return The element count, or 0 for a tensor with no dimensions.
+ */
 int element_count(const TfLiteTensor *tensor)
 {
 	if (tensor->dims->size <= 1) {
@@ -65,12 +81,17 @@ int element_count(const TfLiteTensor *tensor)
 	return count;
 }
 
+/**
+ * @brief Write one input element, quantizing it when the input tensor is int8.
+ * @param index  Element below element_count(input).
+ * @param value  Value in the model's input units.
+ */
 void write_input(int index, float value)
 {
 	if (input->type == kTfLiteInt8) {
-		/* Rounded, not truncated: TFLite quantises to nearest, and truncating
+		/* Rounded, not truncated: TFLite quantizes to nearest, and truncating
 		 * biases every input one step toward zero. Measured against the host
-		 * interpreter, that moved a prediction by a whole quantisation step. */
+		 * interpreter, that moved a prediction by a whole quantization step. */
 		float scaled = roundf(value / input->params.scale + input->params.zero_point);
 
 		/* Saturate: a host sending outside the calibrated range would
@@ -86,6 +107,11 @@ void write_input(int index, float value)
 	}
 }
 
+/**
+ * @brief Read one output element, dequantized when the output tensor is int8.
+ * @param index  Element below element_count(output).
+ * @return The element's value.
+ */
 float read_output(int index)
 {
 	if (output->type == kTfLiteInt8) {
@@ -107,6 +133,12 @@ void setup(void)
 
 	printk("\n=== ZephyrMLForge inference ===\n");
 	printk("model_bytes=%u\n", g_model_len);
+
+#if MLFORGE_VIBRATION
+	/*  Not fatal: inference still runs, & the vibration commands answer
+	 * ERR=sensor_not_ready with the cause printed here. */
+	is_sensor_ready = vibration_init() == 0;
+#endif
 
 	model = tflite::GetModel(g_model);
 	if (model->version() != TFLITE_SCHEMA_VERSION) {
@@ -135,6 +167,9 @@ void setup(void)
 	resolver.AddAveragePool2D();
 	resolver.AddMean();
 	resolver.AddPad();
+	/*  neutron_converter 3.0.1 emits PADV2 for padding it leaves on the
+	 * CPU; without it a compiled convolutional model fails AllocateTensors(). */
+	resolver.AddPadV2();
 	resolver.AddAdd();
 
 	/* Emitted by the converter rather than chosen by the agent: a Keras Flatten
@@ -175,7 +210,7 @@ void setup(void)
 	       element_count(output));
 
 	/* Worth printing: a scale of zero means the converter left the tensor
-	 * unquantised, and every prediction then collapses to the zero point. */
+	 * unquantized, and every prediction then collapses to the zero point. */
 	printk("input_quant scale=%.8f zero_point=%d\n",
 	       static_cast<double>(input->params.scale), input->params.zero_point);
 	printk("output_quant scale=%.8f zero_point=%d\n",
@@ -197,7 +232,7 @@ void run_benchmark(void)
 
 	/* Timed per run, with the input written outside the window. The input must be
 	 * rewritten every pass - the memory planner may overlay its buffer with an
-	 * intermediate tensor - but writing 784 quantised values costs more than the
+	 * intermediate tensor - but writing 784 quantized values costs more than the
 	 * inference itself, so it must not be inside the measurement. Accumulated in
 	 * 64 bits, so a long benchmark cannot wrap the 32-bit counter. */
 	uint64_t total_cycles = 0;
@@ -243,6 +278,153 @@ void run_benchmark(void)
 
 #if MLFORGE_INTERACTIVE
 
+namespace {
+
+/**
+ * @brief Write comma-separated values into the input tensor.
+ * @param cursor  The values, ending at the end of the line.
+ * @param first   Input element the first value goes to.
+ * @param limit   Element at which writing stops, whatever is left of the line.
+ * @return The count written, or -1 when no value could be read.
+ */
+int parse_inputs(const char *cursor, int first, int limit)
+{
+	int index = first;
+
+	while (*cursor == ',' || *cursor == ' ') {
+		cursor++;
+	}
+
+	while (index < limit && *cursor != '\0') {
+		char *next = nullptr;
+		const float value = strtof(cursor, &next);
+
+		if (next == cursor) {
+			return -1;
+		}
+
+		write_input(index++, value);
+		cursor = next;
+		while (*cursor == ',' || *cursor == ' ') {
+			cursor++;
+		}
+	}
+
+	return index == first ? -1 : index - first;
+}
+
+/**
+ * @brief Run the model & print its first kMaxReportedOutputs outputs as an OUT= line,
+ *        or ERR=invoke.
+ */
+void invoke_and_report(void)
+{
+	if (interpreter->Invoke() != kTfLiteOk) {
+		printk("ERR=invoke\n");
+		return;
+	}
+
+	const int output_count = element_count(output);
+	const int reported = output_count < kMaxReportedOutputs ? output_count
+							        : kMaxReportedOutputs;
+	float values[kMaxReportedOutputs];
+
+	for (int i = 0; i < reported; i++) {
+		values[i] = read_output(i);
+	}
+
+	ReportInference(values, reported);
+}
+
+#if MLFORGE_VIBRATION
+
+float window[MLFORGE_VIBRATION_VALUES];
+
+/**
+ * @brief Record a window into window.
+ * @param[out] elapsed_us  Duration of the capture.
+ * @return false, with the error already printed, when no window could be taken at
+ *         the configured rate.
+ */
+bool capture_window(uint32_t *elapsed_us)
+{
+	const int ret = vibration_capture(window, elapsed_us);
+
+	if (ret == -ETIME) {
+		printk("ERR=sample_overrun rate_hz=%d\n", MLFORGE_SAMPLE_RATE_HZ);
+		return false;
+	}
+	if (ret != 0) {
+		printk("ERR=accel_read err=%d\n", ret);
+		return false;
+	}
+	return true;
+}
+
+/**
+ * @brief Answer a MOTOR <state>, WINDOW or CLASSIFY command.
+ * @param line  The command line, starting with its command word.
+ */
+void serve_vibration_request(const char *line)
+{
+	if (!is_sensor_ready) {
+		printk("ERR=sensor_not_ready\n");
+		return;
+	}
+
+	if (strncmp(line, "MOTOR", 5) == 0) {
+		char *end = nullptr;
+		const long state = strtol(line + 5, &end, 10);
+
+		if (end == line + 5 || !vibration_set_motors(static_cast<int>(state))) {
+			printk("ERR=motor_state\n");
+			return;
+		}
+		printk("OK\n");
+		return;
+	}
+
+	uint32_t elapsed_us = 0;
+
+	if (strncmp(line, "WINDOW", 6) == 0) {
+		if (!capture_window(&elapsed_us)) {
+			return;
+		}
+
+		/*  Three decimals in m/s^2 is finer than the sensor's 0.038
+		 * m/s^2 step at +-8 g, & keeps a window to about 3 kB, a quarter of a
+		 * second at 115200 baud. */
+		printk("WINDOW us=%u v=", elapsed_us);
+		for (int i = 0; i < MLFORGE_VIBRATION_VALUES; i++) {
+			printk("%s%.3f", i == 0 ? "" : ",", static_cast<double>(window[i]));
+		}
+		printk("\n");
+		return;
+	}
+
+	if (!is_ready) {
+		printk("ERR=not_ready\n");
+		return;
+	}
+	if (element_count(input) != MLFORGE_VIBRATION_VALUES) {
+		printk("ERR=expected_inputs=%d window_values=%d\n", element_count(input),
+		       MLFORGE_VIBRATION_VALUES);
+		return;
+	}
+	if (!capture_window(&elapsed_us)) {
+		return;
+	}
+
+	for (int i = 0; i < MLFORGE_VIBRATION_VALUES; i++) {
+		write_input(i, window[i]);
+	}
+	invoke_and_report();
+}
+
+#endif /* MLFORGE_VIBRATION */
+
+}  /* namespace */
+
 void serve_request(void)
 {
 	char *line = console_getline();
@@ -267,7 +449,22 @@ void serve_request(void)
 		return;
 	}
 
-	if (strncmp(line, "INFER", 5) != 0) {
+#if MLFORGE_VIBRATION
+	if (strncmp(line, "MOTOR", 5) == 0 || strncmp(line, "WINDOW", 6) == 0 ||
+	    strncmp(line, "CLASSIFY", 8) == 0) {
+		serve_vibration_request(line);
+		return;
+	}
+#endif
+
+	/*  LOAD writes inputs from an offset & INVOKE runs on them, because
+	 * uart_console.c tracks its line position in a uint8_t: a line past 255 characters
+	 * wraps, & INFER then reaches here without its command word. */
+	const bool is_infer = strncmp(line, "INFER", 5) == 0;
+	const bool is_load = strncmp(line, "LOAD", 4) == 0;
+	const bool is_invoke = strncmp(line, "INVOKE", 6) == 0;
+
+	if (!is_infer && !is_load && !is_invoke) {
 		printk("ERR=unknown_command\n");
 		return;
 	}
@@ -277,40 +474,58 @@ void serve_request(void)
 		return;
 	}
 
-	const int input_count = element_count(input);
-	const char *cursor = line + 5;
+	if (is_invoke) {
+		const int loaded = inputs_loaded_since_invoke;
 
-	for (int i = 0; i < input_count; i++) {
-		char *next = nullptr;
-		float value = strtof(cursor, &next);
-
-		if (next == cursor) {
-			printk("ERR=expected_inputs=%d\n", input_count);
+		inputs_loaded_since_invoke = 0;
+		if (loaded != element_count(input)) {
+			printk("ERR=incomplete_inputs loaded=%d inputs=%d\n", loaded,
+			       element_count(input));
 			return;
 		}
-
-		write_input(i, value);
-		cursor = next;
-		while (*cursor == ',' || *cursor == ' ') {
-			cursor++;
-		}
-	}
-
-	if (interpreter->Invoke() != kTfLiteOk) {
-		printk("ERR=invoke\n");
+		invoke_and_report();
 		return;
 	}
 
-	const int output_count = element_count(output);
-	const int reported = output_count < kMaxReportedOutputs ? output_count
-							        : kMaxReportedOutputs;
-	float values[kMaxReportedOutputs];
+	const int input_count = element_count(input);
+	const char *cursor = line + (is_infer ? 5 : 4);
+	int first = 0;
 
-	for (int i = 0; i < reported; i++) {
-		values[i] = read_output(i);
+	if (is_load) {
+		char *next = nullptr;
+
+		first = static_cast<int>(strtol(cursor, &next, 10));
+		if (first == 0) {
+			inputs_loaded_since_invoke = 0;
+		}
+		if (next == cursor || first != inputs_loaded_since_invoke ||
+		    first >= input_count) {
+			printk("ERR=load_offset=%d expected=%d inputs=%d\n", first,
+			       inputs_loaded_since_invoke, input_count);
+			return;
+		}
+		cursor = next;
 	}
 
-	ReportInference(values, reported);
+	int written = parse_inputs(cursor, first, input_count);
+
+	if (written < 0) {
+		printk("ERR=expected_inputs=%d\n", input_count);
+		return;
+	}
+
+	if (is_load) {
+		inputs_loaded_since_invoke += written;
+		printk("OK loaded=%d\n", written);
+		return;
+	}
+
+	if (written != input_count) {
+		printk("ERR=expected_inputs=%d\n", input_count);
+		return;
+	}
+
+	invoke_and_report();
 }
 
 #else

@@ -12,7 +12,7 @@
 """
 Image datasets for classification runs.
 
-Fashion-MNIST and MNIST share a shape, 28x28 greyscale over ten classes, and both are
+Fashion-MNIST and MNIST share a shape, 28x28 grayscale over ten classes, and both are
 fetched by Keras with no account or API token. Fashion-MNIST is the better subject for
 a search: a small convolutional network reaches about 99% on MNIST immediately, leaving
 the agent nothing to improve, where Fashion-MNIST sits nearer 92%.
@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 
 DataTuple = tuple[np.ndarray, np.ndarray]
 
-# Greyscale, so one channel; the trailing dimension is what a Conv2D expects.
+# Grayscale, so one channel; the trailing dimension is what a Conv2D expects.
 IMAGE_SHAPE = (28, 28, 1)
 
 # Highest value a pixel takes before scaling.

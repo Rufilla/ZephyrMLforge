@@ -58,7 +58,7 @@ def test_classification_classes_are_separated():
     features = np.vstack([train_data[0], val_data[0]])
     labels = np.hstack([train_data[1], val_data[1]])
 
-    # Fixed centres at (-0.5, -0.5) and (0.5, 0.5); random centres sometimes coincided
+    # Fixed centers at (-0.5, -0.5) and (0.5, 0.5); random centers sometimes coincided
     # and left the task unlearnable.
     assert features[labels == 0].mean() < features[labels == 1].mean()
 

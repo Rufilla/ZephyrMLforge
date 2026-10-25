@@ -23,6 +23,8 @@ import logging
 import shutil
 from pathlib import Path
 
+from ..core.config import VibrationConfig
+
 logger = logging.getLogger(__name__)
 
 # pipeline/runners/firmware.py -> pipeline/runners -> pipeline -> repository root
@@ -36,7 +38,7 @@ MODEL_BYTES_PER_LINE = 12
 
 
 class FirmwareSource:
-    """Materialises a buildable Zephyr application for one model."""
+    """Materializes a buildable Zephyr application for one model."""
 
     def __init__(self, app_source: Path | None = None):
         self.app_source = app_source or DEFAULT_APP_SOURCE
@@ -44,13 +46,18 @@ class FirmwareSource:
     def prepare_app(
         self,
         app_dir: Path,
-        tflite_path: Path,
+        tflite_path: Path | None,
         tensor_arena_bytes: int,
         benchmark_runs: int,
         is_interactive: bool,
         uses_neutron: bool = False,
+        vibration: VibrationConfig | None = None,
     ) -> None:
         """Copy the application tree into ``app_dir`` and write the generated files.
+
+         With no ``tflite_path`` the tree keeps its placeholder model,
+        which is all capture firmware needs. ``vibration`` enables the ML Vibro Sens
+        Click commands; the build must then add vibration.overlay & vibration.conf.
 
         Raises:
             FileNotFoundError: the zephyr_app source tree is missing, which happens when
@@ -67,9 +74,11 @@ class FirmwareSource:
 
         source_dir = app_dir / "src"
         self.write_app_config(
-            source_dir, tensor_arena_bytes, benchmark_runs, is_interactive, uses_neutron
+            source_dir, tensor_arena_bytes, benchmark_runs, is_interactive, uses_neutron,
+            vibration,
         )
-        self.write_model(source_dir, tflite_path)
+        if tflite_path is not None:
+            self.write_model(source_dir, tflite_path)
 
         logger.info(f"Prepared Zephyr application in {app_dir} from {self.app_source}")
 
@@ -80,8 +89,12 @@ class FirmwareSource:
         benchmark_runs: int,
         is_interactive: bool,
         uses_neutron: bool = False,
+        vibration: VibrationConfig | None = None,
     ) -> None:
         """Write src/app_config.h with the values taken from the pipeline configuration."""
+        #  The firmware's own defaults stand in when vibration is off, so
+        # the header always defines every macro the sources test.
+        window = vibration or VibrationConfig()
         content = f"""/*
  * Copyright (c) 2024 ZephyrMLForge
  * SPDX-License-Identifier: Apache-2.0
@@ -97,6 +110,9 @@ class FirmwareSource:
 #define MLFORGE_BENCHMARK_RUNS {benchmark_runs}
 #define MLFORGE_INTERACTIVE {1 if is_interactive else 0}
 #define MLFORGE_NEUTRON {1 if uses_neutron else 0}
+#define MLFORGE_VIBRATION {1 if vibration else 0}
+#define MLFORGE_WINDOW_SAMPLES {window.window_samples}
+#define MLFORGE_SAMPLE_RATE_HZ {window.sample_rate_hz}
 
 #endif /* ZEPHYR_ML_FORGE_APP_CONFIG_H_ */
 """
@@ -121,7 +137,7 @@ class FirmwareSource:
  * SPDX-License-Identifier: Apache-2.0
  *
  * Model data declarations. Written by the pipeline from the trained .tflite file and
- * retained as a build artefact for inspection or reuse.
+ * retained as a build artifact for inspection or reuse.
  */
 
 #ifndef ZEPHYR_ML_FORGE_MODEL_HPP_

@@ -1,0 +1,98 @@
+#  Vibration classification with the ML Vibro Sens Click on the FRDM-MCXN947
+# A third template: windows recorded from the click's accelerometer, labeled by which of
+# its two motors was running. Record them first with 'zephyr-ml-forge capture'. See
+# config/pipeline_config.yaml for the field reference.
+
+hardware:
+  board: frdm_mcxn947/mcxn947/cpu0
+  soc: mcxn947
+  ram_kb: 512
+  flash_kb: 2048
+  tensor_arena_kb: 32
+  qemu_board: qemu_cortex_m3
+
+execution:
+  cpu: true
+  npu: true                 #  each model is also measured on the NPU
+
+execution_environment:
+  mode: hil                 #  the click is on the hardware; qemu & auto scope it out
+  serial_port: /dev/ttyACM0
+  serial_baud: 115200
+  flash_runner: null
+  build_timeout_s: 600
+  flash_timeout_s: 60
+  run_timeout_s: 30
+  qemu_timeout_s: 120
+  benchmark_runs: 50
+
+accuracy:
+  metric: accuracy
+  target: 0.97
+  max_error: 0.80
+  evaluate_on_device: false #  'zephyr-ml-forge demo' scores live windows instead
+  on_device_samples: 64
+
+performance:
+  max_latency_ms: 20
+  max_ram_kb: 128
+  max_flash_kb: 512
+
+quantization:
+  allowed:
+    - int8
+  per_channel: true
+
+ai_agent:
+  provider: claude
+  model: null
+  temperature: 0.7
+  max_tokens: 16000
+  max_retries: 2
+  cli_path: claude
+  cli_timeout_s: 300
+
+iteration:
+  max_iterations: 6
+  early_stop_on_target: true
+  allow_agent_stop: true
+
+training:
+  epochs: 80
+  batch_size: 32
+  early_stopping_patience: 8
+  max_parameters: 20000
+  max_layers: 12
+
+build:
+  build_dir: /tmp/zephyr-build
+
+dataset:
+  source: vibration
+
+#  Changing sample_rate_hz or window_samples needs a new recording; the
+# pipeline refuses one taken at other settings.
+vibration:
+  recording: data/vibration.npz
+  sample_rate_hz: 1000
+  window_samples: 128       #  128 ms a window
+  windows_per_class: 600    #  about 14 minutes; on 2026-10-25 the unbalanced
+                            # motor ran at 151 Hz from cold & settled at 155 Hz, & the
+                            # balanced one at 319-331 Hz
+  rounds: 10
+  val_rounds: 1             #  60 windows a state held out; at 97% accuracy the
+                            # standard error is about 1.3 points
+  settle_s: 1.0
+
+#  Only the task & seed apply here; the rest describe synthetic data.
+synthetic_data:
+  task: classification
+  function: sine
+  samples: 1000
+  noise_stddev: 0.1
+  train_split: 0.8
+  seed: 42
+
+user:
+  username: ""
+  password: "${AI_PIPELINE_PASSWORD}"

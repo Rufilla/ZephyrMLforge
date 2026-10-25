@@ -43,17 +43,22 @@ class PseudoAgent(BaseAgent):
         raise NotImplementedError("The pseudo agent does not call a provider")
 
     @staticmethod
-    def _convolutional_body(iteration: int) -> tuple[str, str]:
+    def _convolutional_body(iteration: int, input_shape: list[int]) -> tuple[str, str]:
         """Two convolution blocks for an image input, narrowing on later iterations."""
         first, second = CONVOLUTION_FILTERS[(iteration - 1) % len(CONVOLUTION_FILTERS)]
 
+        #  A (samples, 1, axes) vibration window has a width of one, which a
+        # square kernel & a 2x2 pool would reduce to nothing.
+        is_window = len(input_shape) == 3 and input_shape[1] == 1
+        kernel, pool = ("(3, 1)", "(2, 1)") if is_window else ("3", "2")
+
         body = (
-            f"        tf.keras.layers.Conv2D({first}, 3, activation='relu', "
+            f"        tf.keras.layers.Conv2D({first}, {kernel}, activation='relu', "
             "padding='same', name='conv_1'),\n"
-            "        tf.keras.layers.MaxPooling2D(2, name='pool_1'),\n"
-            f"        tf.keras.layers.Conv2D({second}, 3, activation='relu', "
+            f"        tf.keras.layers.MaxPooling2D({pool}, name='pool_1'),\n"
+            f"        tf.keras.layers.Conv2D({second}, {kernel}, activation='relu', "
             "padding='same', name='conv_2'),\n"
-            "        tf.keras.layers.MaxPooling2D(2, name='pool_2'),\n"
+            f"        tf.keras.layers.MaxPooling2D({pool}, name='pool_2'),\n"
             "        tf.keras.layers.Flatten(name='flatten'),"
         )
         return body, f"Convolutional network with {first} and {second} filters"
@@ -84,7 +89,7 @@ class PseudoAgent(BaseAgent):
         is_image = len(input_shape) > 1
 
         if is_image:
-            body, description = self._convolutional_body(iteration)
+            body, description = self._convolutional_body(iteration, list(input_shape))
         else:
             body = (
                 f"        tf.keras.layers.Dense({first_width}, activation='relu', "

@@ -123,7 +123,7 @@ complexity_hint = "The pattern is periodic and smooth, suitable for a small neur
 
 [tool.zephyr-ml-forge.tasks.fashion_mnist]
 description = """
-Classify 28x28 greyscale images of clothing into ten categories: t-shirt, trouser,
+Classify 28x28 grayscale images of clothing into ten categories: t-shirt, trouser,
 pullover, dress, coat, sandal, shirt, sneaker, bag and ankle boot.
 
 The model must:
@@ -135,19 +135,45 @@ The model must:
 - Keep the tensor arena within the configured size, which bounds how wide the early
   feature maps can be
 """
-input_description = "A 28x28x1 greyscale image, pixel values in [0, 1]"
+input_description = "A 28x28x1 grayscale image, pixel values in [0, 1]"
 output_description = "Ten class scores; the highest is the predicted garment"
 domain = "image classification"
-complexity_hint = "Convolution earns its cost here; the classes differ by texture and outline, not colour"
+complexity_hint = "Convolution earns its cost here; the classes differ by texture and outline, not color"
 
 [tool.zephyr-ml-forge.tasks.mnist]
 description = """
-Classify 28x28 greyscale images of handwritten digits, 0 to 9.
+Classify 28x28 grayscale images of handwritten digits, 0 to 9.
 
 The model must accept a 28x28x1 image scaled to [0, 1] and produce ten class scores
 through a softmax output, within the tensor arena and parameter budget configured.
 """
-input_description = "A 28x28x1 greyscale image, pixel values in [0, 1]"
+input_description = "A 28x28x1 grayscale image, pixel values in [0, 1]"
 output_description = "Ten class scores; the highest is the predicted digit"
 domain = "image classification"
 complexity_hint = "A small convolutional stack reaches very high accuracy quickly on this set"
+
+[tool.zephyr-ml-forge.tasks.vibration]
+description = """
+Classify 128 ms of three-axis accelerometer data by which motor was running on the
+board it was recorded on. The board carries two small motors, one balanced and one with
+an unbalanced weight, and three states are distinguished: off, balanced only, and
+unbalanced only.
+
+The model must:
+- Accept a (128, 1, 3) window: 128 samples at 1 kHz of x, y and z acceleration in
+  m/s^2, each axis with its own window mean removed
+- Produce three class scores through a softmax output, in the order off, balanced,
+  unbalanced
+- Fit a microcontroller. Convolution over time is expressed as Conv2D with (k, 1)
+  kernels; Conv1D is not available on the device
+
+The states differ greatly in vibration amplitude: the unbalanced motor's is roughly ten
+times the balanced motor's. Its speed also drifts upward as it warms over a recording
+session, and the validation windows are the last ones recorded, so a model keyed to
+one exact frequency will generalize poorly. Latency and size are where the search has
+room to improve.
+"""
+input_description = "A (128, 1, 3) window of x, y, z acceleration in m/s^2 at 1 kHz, mean removed per axis"
+output_description = "Three class scores: off, balanced, unbalanced"
+domain = "vibration classification"
+complexity_hint = "A few (k, 1) convolutions with pooling, then a small dense head"

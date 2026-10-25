@@ -147,7 +147,7 @@ class ModelTrainer:
         if metrics.epochs_trained >= self.training.epochs:
             # Early stopping never fired, so the budget ended training rather than
             # convergence. Comparing such iterations ranks how fast an architecture
-            # trains as much as how good it is, and penalises the deeper ones.
+            # trains as much as how good it is, and penalizes the deeper ones.
             logger.warning(
                 f"Training stopped at the {self.training.epochs}-epoch cap without "
                 "converging; this model is under-trained, and comparisons with it "

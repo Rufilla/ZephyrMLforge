@@ -19,28 +19,40 @@ from __future__ import annotations
 
 import argparse
 import logging
+import math
 import os
 import shutil
 import sys
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+import numpy as np
 from dotenv import load_dotenv
 from rich.console import Console
 from rich.logging import RichHandler
+from rich.progress import Progress
 from rich.table import Table
 
 from .agents import create_agent
 from .core.boards import BoardCapabilities, BoardRegistry
-from .core.config import ExecutionMode, PipelineConfig, TaskDescription
+from .core.config import DatasetSource, ExecutionMode, PipelineConfig, TaskDescription
 from .core.output import OutputSettings, Verbosity, configure_output
 from .core.pipeline import Pipeline
 from .data.datasets import create_data_source
 from .data.synthetic import SyntheticDataGenerator
+from .data.vibration import (
+    CLASS_NAMES,
+    Recording,
+    VibrationDataset,
+    motors_off_afterwards,
+    record,
+)
 from .metrics.collector import MetricsCollector
+from .models.neutron import find_neutron_compiler
 from .models.trainer import ModelTrainer
-from .runners import AutoRunner, HILRunner, QEMURunner, SimulatedRunner
+from .runners import AutoRunner, DeviceError, DeviceLink, HILRunner, QEMURunner, SimulatedRunner
 
 console = Console()
 
@@ -194,6 +206,27 @@ def _create_runner(config: PipelineConfig, args: argparse.Namespace, zephyr_base
     return QEMURunner(config, zephyr_base)
 
 
+def _create_npu_runner(
+    config: PipelineConfig, args: argparse.Namespace, zephyr_base: Path | None, uses_npu: bool
+) -> HILRunner | None:
+    """ The runner that measures each model on the NPU after the CPU, or
+    None when there is no NPU pass: CPU off, no accelerator, or no hardware in the run."""
+    if not (uses_npu and config.execution.cpu):
+        return None
+
+    if args.simulate or config.execution_environment.mode is ExecutionMode.QEMU:
+        _announce(
+            args,
+            "[yellow]Skipping the NPU measurement: it needs the board, & this run "
+            "builds no hardware firmware.[/yellow]",
+        )
+        return None
+
+    npu_runner = HILRunner(config, zephyr_base)
+    npu_runner.uses_neutron = True
+    return npu_runner
+
+
 def _announce(args: argparse.Namespace, message: str) -> None:
     """Print progress that is not a warning, unless the run asked for quiet."""
     if getattr(args, "verbosity", Verbosity.NORMAL) is not Verbosity.QUIET:
@@ -242,18 +275,36 @@ def cmd_run(args: argparse.Namespace) -> int:
             "firmware.[/yellow]",
         )
         board = BoardCapabilities()
-    elif config.execution.npu and not board.has_npu:
+    elif config.execution.npu and not board.has_npu and not config.execution.cpu:
         console.print(
-            f"[red]execution.npu is set, but {config.hardware.board} has no accelerator "
-            "declared in pyproject.toml.[/red]"
+            f"[red]execution.cpu is off & execution.npu is on, but {config.hardware.board} "
+            "has no accelerator declared in pyproject.toml.[/red]"
         )
         console.print(
             "[yellow]Boards with one: "
             f"{', '.join(BoardRegistry.discover().boards_with_npu()) or 'none declared'}. "
-            "Set execution.npu to false, or add the board under "
+            "Turn execution.cpu on, or add the board under "
             r"\[tool.zephyr-ml-forge.boards].[/yellow]"
         )
         return 1
+    elif config.execution.npu and not board.has_npu:
+        _announce(
+            args,
+            f"[yellow]{config.hardware.board} declares no accelerator; measuring on the "
+            "CPU only.[/yellow]",
+        )
+    elif config.execution.npu and find_neutron_compiler() is None and not config.execution.cpu:
+        console.print(
+            "[red]execution.cpu is off & execution.npu is on, but no Neutron converter is "
+            "installed. Install it per docs/accelerators.md, or turn execution.cpu on.[/red]"
+        )
+        return 1
+    elif config.execution.npu and find_neutron_compiler() is None:
+        console.print(
+            "[yellow]No Neutron converter installed; measuring on the CPU only. Install it "
+            "per docs/accelerators.md, or set execution.npu to false.[/yellow]"
+        )
+        board = BoardCapabilities()
     elif config.execution.npu:
         _announce(
             args,
@@ -275,14 +326,19 @@ def cmd_run(args: argparse.Namespace) -> int:
             f"[green]AI agent: {config.ai_agent.provider.value} ({agent.model})[/green]",
         )
 
-        data_generator = create_data_source(
-            config.dataset,
-            SyntheticDataGenerator(config.synthetic_data),
-            seed=config.synthetic_data.seed,
-        )
+        if config.dataset.source is DatasetSource.VIBRATION:
+            data_generator = VibrationDataset(config.vibration)
+        else:
+            data_generator = create_data_source(
+                config.dataset,
+                SyntheticDataGenerator(config.synthetic_data),
+                seed=config.synthetic_data.seed,
+            )
         trainer = ModelTrainer(config.training, seed=config.synthetic_data.seed)
         runner = _create_runner(config, args, zephyr_env.zephyr_base)
-        runner.uses_neutron = config.execution.npu and board.has_npu
+        uses_npu = config.execution.npu and board.has_npu
+        runner.uses_neutron = uses_npu and not config.execution.cpu
+        npu_runner = _create_npu_runner(config, args, zephyr_env.zephyr_base, uses_npu)
         metrics_collector = MetricsCollector(output_dir=artifacts_dir)
     except Exception as error:
         console.print(f"[red]Error initializing components: {error}[/red]")
@@ -301,6 +357,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             Path(args.config).resolve().parent, source=config.dataset.source.value
         ),
         board=board,
+        npu_runner=npu_runner,
     )
 
     _announce(args, "\n[bold blue]Starting pipeline execution[/bold blue]\n")
@@ -400,6 +457,229 @@ def cmd_graph(args: argparse.Namespace) -> int:
     return 0
 
 
+def _load_vibration_config(args: argparse.Namespace) -> tuple[PipelineConfig, Path] | None:
+    """ Load a vibration configuration & check west can build for it.
+
+    Returns:
+        The configuration & ZEPHYR_BASE, or None with the reason already printed.
+    """
+    try:
+        config = PipelineConfig.from_yaml(args.config)
+    except Exception as error:
+        console.print(f"[red]Error loading config: {error}[/red]")
+        return None
+
+    if config.dataset.source is not DatasetSource.VIBRATION:
+        console.print(
+            f"[red]{args.config} sets dataset.source '{config.dataset.source.value}'; this "
+            "command needs 'vibration', as in config/vibration_config.yaml.[/red]"
+        )
+        return None
+
+    if args.serial_port:
+        config.execution_environment.serial_port = args.serial_port
+
+    zephyr_env = ZephyrEnvironment.detect()
+    if not zephyr_env.is_valid:
+        console.print("[red]ZEPHYR_BASE is unset or missing; run 'source activate.sh'.[/red]")
+        return None
+
+    return config, zephyr_env.zephyr_base
+
+
+def _print_build_failure(result) -> None:
+    """ The tail of west's output, where the compiler error is."""
+    console.print("[red]Firmware build failed:[/red]")
+    console.print("\n".join((result.error_message or "").splitlines()[-25:]))
+
+
+def cmd_capture(args: argparse.Namespace) -> int:
+    """ Record labeled windows from the ML Vibro Sens Click."""
+    loaded = _load_vibration_config(args)
+    if loaded is None:
+        return 1
+    config, zephyr_base = loaded
+    vibration = config.vibration
+    output_path = Path(vibration.recording)
+
+    #  Load before recording, so a missing or mismatched recording fails
+    # without spending a session.
+    earlier = None
+    if args.append:
+        try:
+            earlier = Recording.load(output_path)
+        except (FileNotFoundError, ValueError) as error:
+            console.print(f"[red]{error}[/red]")
+            return 1
+        if (
+            earlier.sample_rate_hz != vibration.sample_rate_hz
+            or earlier.window_samples != vibration.window_samples
+        ):
+            console.print(
+                f"[red]{output_path} holds {earlier.window_samples}-sample windows at "
+                f"{earlier.sample_rate_hz} Hz, but the configuration asks for "
+                f"{vibration.window_samples} at {vibration.sample_rate_hz} Hz; record "
+                "without --append to replace it[/red]"
+            )
+            return 1
+
+    runner = HILRunner(config, zephyr_base)
+    build_dir = config.build.get_build_path() / f"capture_{runner.build_identifier}"
+
+    console.print(f"[green]Building capture firmware for {config.hardware.board}[/green]")
+    result = runner.build_capture_firmware(build_dir)
+    if not result.success:
+        _print_build_failure(result)
+        return 1
+
+    per_class = math.ceil(vibration.windows_per_class / vibration.rounds) * vibration.rounds
+    console.print(
+        f"[green]Flashing; then recording {per_class} windows of each of "
+        f"{', '.join(CLASS_NAMES)} in {vibration.rounds} rounds[/green]"
+    )
+
+    try:
+        port = runner.flash_and_connect()
+        with DeviceLink(port, config.execution_environment.serial_baud) as link:
+            if not link.ping():
+                raise DeviceError(f"The board on {port} did not answer PING after flashing")
+
+            with Progress(console=console) as progress:
+                task = progress.add_task("Recording", total=None)
+                recording = record(
+                    link,
+                    vibration,
+                    on_progress=lambda done, total: progress.update(
+                        task, completed=done, total=total
+                    ),
+                )
+    except DeviceError as error:
+        console.print(f"[red]Capture failed: {error}[/red]")
+        return 1
+
+    if earlier is not None:
+        recording = earlier.followed_by(recording)
+    recording.save(output_path)
+
+    table = Table(title=f"Recorded at {recording.measured_rate_hz:.0f} Hz")
+    table.add_column("Motors", style="cyan")
+    table.add_column("Windows", justify="right")
+    table.add_column("RMS x, y, z (m/s²)", justify="right")
+    for state, name in enumerate(CLASS_NAMES):
+        windows = recording.features[recording.labels == state]
+        rms = np.sqrt((windows**2).mean(axis=(0, 1, 2)))
+        table.add_row(name, str(len(windows)), ", ".join(f"{value:.2f}" for value in rms))
+    console.print(table)
+    console.print(f"[green]Saved {len(recording.labels)} windows to {output_path}[/green]")
+    return 0
+
+
+def _choose_demo_iteration(artifacts_dir: Path, config: PipelineConfig, chosen: int | None):
+    """ The requested iteration, or the best successful one.
+
+    Returns:
+        The iteration's directory, or None with the reason already printed.
+    """
+    if chosen is not None:
+        iteration_dir = artifacts_dir / f"iteration_{chosen:04d}"
+    else:
+        records = [
+            record
+            for record in MetricsCollector.from_artifacts(artifacts_dir).records
+            if record.status == "success" and record.accuracy_value is not None
+        ]
+        if not records:
+            console.print(f"[red]No successful iteration in {artifacts_dir}[/red]")
+            return None
+
+        is_higher_better = config.accuracy.metric.is_higher_better
+        best = (max if is_higher_better else min)(records, key=lambda r: r.accuracy_value)
+        iteration_dir = artifacts_dir / f"iteration_{best.iteration:04d}"
+
+    app_config = iteration_dir / "zephyr_build" / "app_src" / "src" / "app_config.h"
+    if not app_config.exists():
+        console.print(f"[red]{iteration_dir} holds no firmware source to rebuild[/red]")
+        return None
+
+    if "#define MLFORGE_VIBRATION 1" not in app_config.read_text():
+        console.print(
+            f"[red]{iteration_dir} was built without the vibration commands; run the "
+            "pipeline in hil mode with config/vibration_config.yaml first.[/red]"
+        )
+        return None
+
+    return iteration_dir
+
+
+def cmd_demo(args: argparse.Namespace) -> int:
+    """ Run a trained model on live windows, with the motors cycled."""
+    loaded = _load_vibration_config(args)
+    if loaded is None:
+        return 1
+    config, zephyr_base = loaded
+
+    iteration_dir = _choose_demo_iteration(Path(args.artifacts_dir), config, args.iteration)
+    if iteration_dir is None:
+        return 1
+
+    app_source = iteration_dir / "zephyr_build" / "app_src"
+    runner = HILRunner(config, zephyr_base)
+    runner.uses_neutron = "#define MLFORGE_NEUTRON 1" in (
+        app_source / "src" / "app_config.h"
+    ).read_text()
+    build_dir = config.build.get_build_path() / f"demo_{runner.build_identifier}"
+
+    console.print(f"[green]Rebuilding {iteration_dir.name} for the demo[/green]")
+    result = runner.build_saved_app(app_source, build_dir)
+    if not result.success:
+        _print_build_failure(result)
+        return 1
+
+    class_count = len(CLASS_NAMES)
+    confusion = np.zeros((class_count, class_count), dtype=int)
+
+    try:
+        port = runner.flash_and_connect()
+        with DeviceLink(port, config.execution_environment.serial_baud) as link:
+            if not link.ping():
+                raise DeviceError(f"The board on {port} did not answer PING after flashing")
+
+            with motors_off_afterwards(link):
+                for _ in range(args.cycles):
+                    for state, name in enumerate(CLASS_NAMES):
+                        link.set_motors(state)
+                        time.sleep(config.vibration.settle_s)
+
+                        for _ in range(args.windows):
+                            scores = link.classify()
+                            predicted = int(np.argmax(scores))
+                            confusion[state, predicted] += 1
+
+                            color = "green" if predicted == state else "red"
+                            console.print(
+                                f"motors {name:<10} → [{color}]{CLASS_NAMES[predicted]:<10}"
+                                f"[/{color}] score {max(scores):.2f}"
+                            )
+    except DeviceError as error:
+        console.print(f"[red]Demo failed: {error}[/red]")
+        return 1
+
+    table = Table(title=f"{iteration_dir.name} on live windows")
+    table.add_column("Motors \\ predicted", style="cyan")
+    for name in CLASS_NAMES:
+        table.add_column(name, justify="right")
+    for state, name in enumerate(CLASS_NAMES):
+        table.add_row(name, *(str(count) for count in confusion[state]))
+    console.print(table)
+
+    correct = int(np.trace(confusion))
+    console.print(
+        f"[bold]{correct} of {confusion.sum()} windows correct "
+        f"({correct / confusion.sum():.1%})[/bold]"
+    )
+    return 0
+
+
 def _print_config_summary(
     config: PipelineConfig, zephyr_env: ZephyrEnvironment | None = None
 ) -> None:
@@ -439,10 +719,24 @@ def _print_config_summary(
         ("Max Flash", f"{config.performance.max_flash_kb} KB"),
         ("Dataset", config.dataset.source.value),
         ("Task Type", config.synthetic_data.task.value),
-        ("Data Function", config.synthetic_data.function.value),
-        ("Samples", str(config.synthetic_data.samples)),
-        ("Build Dir", config.build.build_dir),
     )
+    #  Only the rows describing the configured dataset.
+    if config.dataset.source is DatasetSource.SYNTHETIC:
+        rows += (
+            ("Data Function", config.synthetic_data.function.value),
+            ("Samples", str(config.synthetic_data.samples)),
+        )
+    elif config.dataset.source is DatasetSource.VIBRATION:
+        rows += (
+            ("Recording", config.vibration.recording),
+            (
+                "Window",
+                f"{config.vibration.window_samples} samples at "
+                f"{config.vibration.sample_rate_hz} Hz",
+            ),
+        )
+    rows += (("Build Dir", config.build.build_dir),)
+
     for name, value in rows:
         table.add_row(name, value)
 
@@ -463,6 +757,13 @@ def _print_results_summary(state, config: PipelineConfig) -> None:
     table.add_column("RAM (KB)", style="blue")
     table.add_column("Flash (KB)", style="blue")
 
+    has_npu_pass = any(
+        r.npu_latency_ms is not None or r.npu_failure_message for r in state.iterations
+    )
+    if has_npu_pass:
+        table.add_column("NPU (ms)", style="magenta")
+        table.add_column(f"NPU {metric_label}", style="yellow")
+
     for result in state.iterations:
         status_color = {
             "success": "green",
@@ -472,14 +773,17 @@ def _print_results_summary(state, config: PipelineConfig) -> None:
         }.get(result.status.value, "white")
 
         # Compared against None, not truthiness: a legitimate 0.0 rendered as '-'.
-        table.add_row(
+        row = [
             str(result.iteration_number),
             f"[{status_color}]{result.status.value}[/{status_color}]",
             _format_accuracy(result),
             "-" if result.latency_ms is None else f"{result.latency_ms:.3f}",
             "-" if result.ram_usage_kb is None else str(result.ram_usage_kb),
             "-" if result.flash_usage_kb is None else str(result.flash_usage_kb),
-        )
+        ]
+        if has_npu_pass:
+            row += _format_npu_cells(result)
+        table.add_row(*row)
 
     console.print(table)
 
@@ -512,6 +816,29 @@ def _format_accuracy(result) -> str:
         return f"{result.accuracy_value:.6f}"
 
     return f"{result.accuracy_value:.6f} ± {result.accuracy_standard_error:.6f}"
+
+
+def _positive_int(text: str) -> int:
+    """ argparse type for a count that must be at least one."""
+    value = int(text)
+    if value < 1:
+        raise argparse.ArgumentTypeError(f"must be 1 or more, not {value}")
+    return value
+
+
+def _format_npu_cells(result) -> list[str]:
+    """ The NPU latency & on-board score, or why there are none."""
+    if result.npu_failure_message:
+        return ["[red]failed[/red]", "-"]
+    if result.npu_latency_ms is None:
+        return ["-", "-"]
+
+    accuracy = "-"
+    if result.npu_accuracy_value is not None:
+        accuracy = f"{result.npu_accuracy_value:.6f}"
+        if result.npu_accuracy_standard_error is not None:
+            accuracy += f" ± {result.npu_accuracy_standard_error:.6f}"
+    return [f"{result.npu_latency_ms:.3f}", accuracy]
 
 
 def main() -> int:
@@ -573,6 +900,51 @@ def main() -> int:
         help="Directory containing artifacts",
     )
     graph_parser.set_defaults(func=cmd_graph)
+
+    capture_parser = subparsers.add_parser(
+        "capture", parents=[verbosity_flags],
+        help="Record labeled windows from the ML Vibro Sens Click",
+    )
+    capture_parser.add_argument(
+        "-c", "--config", type=Path, default=Path("config/vibration_config.yaml"),
+        help="Path to a configuration with dataset.source: vibration",
+    )
+    capture_parser.add_argument(
+        "--serial-port", type=str, default=None, help="Override the configured serial port",
+    )
+    capture_parser.add_argument(
+        "--append", action="store_true",
+        help="Add the session after the existing recording instead of replacing it",
+    )
+    capture_parser.set_defaults(func=cmd_capture)
+
+    demo_parser = subparsers.add_parser(
+        "demo", parents=[verbosity_flags],
+        help="Classify live ML Vibro Sens Click windows with a trained iteration",
+    )
+    demo_parser.add_argument(
+        "-c", "--config", type=Path, default=Path("config/vibration_config.yaml"),
+        help="Path to a configuration with dataset.source: vibration",
+    )
+    demo_parser.add_argument(
+        "-a", "--artifacts-dir", type=Path, default=Path("artifacts"),
+        help="Directory containing the run's artifacts",
+    )
+    demo_parser.add_argument(
+        "-i", "--iteration", type=int, default=None,
+        help="Iteration to run; the best successful one when omitted",
+    )
+    demo_parser.add_argument(
+        "--cycles", type=_positive_int, default=2, help="Passes through the three motor states",
+    )
+    demo_parser.add_argument(
+        "--windows", type=_positive_int, default=5,
+        help="Windows classified per motor state per pass",
+    )
+    demo_parser.add_argument(
+        "--serial-port", type=str, default=None, help="Override the configured serial port",
+    )
+    demo_parser.set_defaults(func=cmd_demo)
 
     viz_parser = subparsers.add_parser(
         "visualize", parents=[verbosity_flags], help="Visualize a TFLite model"

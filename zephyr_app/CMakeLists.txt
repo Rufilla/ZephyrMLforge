@@ -19,11 +19,14 @@ zephyr_compile_options($<$<COMPILE_LANGUAGE:CXX>:${NO_THREADSAFE_STATICS}>)
 #   - main_functions.cpp: Interpreter setup, benchmark and host request handling
 #   - model.cpp: Compiled model data (generated from .tflite)
 #   - output_handler.cpp: Metrics output for pipeline parsing
+#   - vibration.cpp:  ML Vibro Sens Click support, empty unless
+#     MLFORGE_VIBRATION is 1
 target_sources(app PRIVATE
     src/main.c
     src/main_functions.cpp
     src/model.cpp
     src/output_handler.cpp
+    src/vibration.cpp
 )
 
 target_include_directories(app PRIVATE

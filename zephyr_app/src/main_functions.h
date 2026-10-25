@@ -13,15 +13,24 @@
 extern "C" {
 #endif
 
-/* Initialises the interpreter and prints 'STATUS=ready' or 'STATUS=error'.
- * Every later entry point is a no-op once setup has failed. */
+/**
+ * @brief Initialize the interpreter & print 'STATUS=ready' or 'STATUS=error'.
+ *
+ * Every later entry point is a no-op once setup has failed.
+ */
 void setup(void);
 
-/* Times MLFORGE_BENCHMARK_RUNS inferences and prints one METRICS block. */
+/**
+ * @brief Time MLFORGE_BENCHMARK_RUNS inferences & print one METRICS block.
+ */
 void run_benchmark(void);
 
-/* Reads one command line from the console and answers it. Blocks until a line
- * arrives. Commands: 'PING', 'INFER <f>[,<f>...]'. */
+/**
+ * @brief Read one command line from the console & answer it.
+ *
+ * Blocks until a line arrives. Commands: PING, BENCH, INFER, LOAD & INVOKE, plus
+ * MOTOR, WINDOW & CLASSIFY in a vibration build.
+ */
 void serve_request(void);
 
 #ifdef __cplusplus

@@ -28,6 +28,10 @@ import serial
 
 logger = logging.getLogger(__name__)
 
+#  uart_console.c tracks its line position in a uint8_t, so a command past
+# 255 characters wraps; LOAD lines are filled to this length & no further.
+MAX_COMMAND_LENGTH = 240
+
 
 class DeviceError(RuntimeError):
     """The board answered with an error, or did not answer at all."""
@@ -144,26 +148,108 @@ class DeviceLink:
         return self.read_until_marker("METRICS_END", timeout_s=timeout_s)
 
     def request_inference(self, features: Sequence[float]) -> list[float]:
-        """Send one INFER command and return the dequantised outputs.
+        """ Run one inference on the board & return the dequantized outputs.
+
+        Inputs that fit one line go as INFER; longer ones as LOAD lines & an INVOKE.
 
         Raises:
             DeviceError: the board reported an error or did not reply in time.
         """
-        self._write_line("INFER " + ",".join(f"{value:.6f}" for value in features))
+        values = [f"{value:.6f}" for value in features]
+        line = "INFER " + ",".join(values)
 
+        if len(line) <= MAX_COMMAND_LENGTH:
+            self._write_line(line)
+            command = "INFER"
+        else:
+            #  The firmware's console wraps a line past 255 characters.
+            first = 0
+            while first < len(values):
+                load = f"LOAD {first} {values[first]}"
+                count = 1
+                while (
+                    first + count < len(values)
+                    and len(load) + 1 + len(values[first + count]) <= MAX_COMMAND_LENGTH
+                ):
+                    load += "," + values[first + count]
+                    count += 1
+                self._write_line(load)
+                reply = self._await_reply(("OK loaded=",), "LOAD")
+                loaded = int(reply[len("OK loaded=") :])
+                if loaded != count:
+                    raise DeviceError(
+                        f"Board loaded {loaded} of the {count} inputs sent from offset "
+                        f"{first}; the model takes fewer inputs than the {len(values)} sent"
+                    )
+                first += count
+            self._write_line("INVOKE")
+            command = "INVOKE"
+
+        reply = self._await_reply(("OUT=",), command)
+        return [float(value) for value in reply[len("OUT=") :].split(",") if value]
+
+    def set_motors(self, state: int) -> None:
+        """ Switch the ML Vibro Sens Click's motors: 0 off, 1 balanced only,
+        2 unbalanced only.
+
+        Raises:
+            DeviceError: the board rejected the state, or runs firmware built without
+                vibration support.
+        """
+        self._write_line(f"MOTOR {state}")
+        self._await_reply(("OK",), "MOTOR")
+
+    def capture_window(self) -> tuple[int, list[float]]:
+        """ Record one accelerometer window on the board.
+
+        Returns:
+            The capture's duration in microseconds, & its values, interleaved x, y, z,
+            each axis with its window mean removed.
+
+        Raises:
+            DeviceError: the board reported an error or did not reply in time.
+        """
+        self._write_line("WINDOW")
+        reply = self._await_reply(("WINDOW us=",), "WINDOW")
+
+        #  'WINDOW us=128500 v=0.012,-0.034,...'
+        duration_field, values_field = reply.split(" ", 2)[1:]
+        return int(duration_field[len("us=") :]), [
+            float(value) for value in values_field[len("v=") :].split(",") if value
+        ]
+
+    def classify(self) -> list[float]:
+        """ Have the board record a window & return its class scores.
+
+        Raises:
+            DeviceError: the board reported an error or did not reply in time.
+        """
+        self._write_line("CLASSIFY")
+        reply = self._await_reply(("OUT=",), "CLASSIFY")
+        return [float(value) for value in reply[len("OUT=") :].split(",") if value]
+
+    def _await_reply(self, prefixes: tuple[str, ...], command: str) -> str:
+        """ Return the first line starting with one of ``prefixes``.
+
+        The console echoes each command back, so the echo is skipped rather than taken
+        for a reply.
+
+        Raises:
+            DeviceError: the board answered ERR=, or nothing matched in time.
+        """
         deadline = time.monotonic() + self.read_timeout_s * 2
         while time.monotonic() < deadline:
             line = self._read_line()
             if line is None:
                 continue
 
-            if line.startswith("OUT="):
-                return [float(value) for value in line[len("OUT=") :].split(",") if value]
+            if line.startswith(prefixes):
+                return line
 
             if line.startswith("ERR="):
-                raise DeviceError(f"Board rejected the request: {line}")
+                raise DeviceError(f"Board rejected {command}: {line}")
 
-        raise DeviceError("No reply to INFER within the read timeout")
+        raise DeviceError(f"No reply to {command} within the read timeout")
 
     def _write_line(self, text: str) -> None:
         """Send one command line.

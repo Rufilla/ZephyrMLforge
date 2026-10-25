@@ -432,3 +432,113 @@ def test_the_runner_up_is_the_second_best_rather_than_the_previous_iteration():
     ]
 
     assert "iteration 1" in state.unresolved_ranking()
+
+
+class FakeNpuRunner:
+    """ Answers build & run with fixed results, recording the model it built."""
+
+    def __init__(self, build_result, exec_result=None):
+        self.build_result = build_result
+        self.exec_result = exec_result
+        self.built_models = []
+
+    def build(self, tflite_path, build_dir, host_model_path=None):
+        self.built_models.append(tflite_path)
+        return self.build_result
+
+    def run(self, build_dir, test_data):
+        return self.exec_result
+
+
+def measure_on_npu(tmp_path, monkeypatch, npu_runner, zephyr_bases=None):
+    from pipeline.core.boards import Accelerator, BoardCapabilities
+    from pipeline.models import neutron
+
+    def fake_compile(source, destination, target, zephyr_base=None):
+        if zephyr_bases is not None:
+            zephyr_bases.append(zephyr_base)
+        return neutron.NeutronResult(
+            output_path=destination, converted_operator_count=15, estimated_cycles=None,
+            output_bytes=0,
+        )
+
+    monkeypatch.setattr(neutron, "compile_for_neutron", fake_compile)
+    config = build_config(build={"build_dir": str(tmp_path / "build")})
+    pipeline = Pipeline(
+        config=config, agent=Unused(), data_generator=Unused(), trainer=Unused(),
+        runner=Unused(), metrics_collector=Unused(), artifacts_dir=tmp_path / "artifacts",
+        task_description=TaskDescription(),
+        board=BoardCapabilities(accelerator=Accelerator.NEUTRON, neutron_target="mcxn94x"),
+        npu_runner=npu_runner,
+    )
+    result = make_result(latency_ms=6.95)
+    iter_dir = tmp_path / "artifacts" / "iteration_0001"
+    iter_dir.mkdir(parents=True)
+
+    pipeline._measure_on_npu(iter_dir / "model.tflite", iter_dir, result, val_data=None)
+    return result
+
+
+def test_npu_measurement_is_recorded_beside_the_cpu_one(tmp_path, monkeypatch):
+    from pipeline.runners.base import BuildResult, ExecutionResult
+
+    runner = FakeNpuRunner(
+        BuildResult(success=True, ram_usage_kb=80, flash_usage_kb=223),
+        ExecutionResult(
+            success=True, latency_ms=0.386, accuracy_value=1 / 3,
+            accuracy_standard_error=0.06, accuracy_sample_count=60,
+        ),
+    )
+
+    result = measure_on_npu(tmp_path, monkeypatch, runner)
+
+    assert (result.latency_ms, result.npu_latency_ms) == (6.95, 0.386)
+    assert result.npu_accuracy_sample_count == 60
+    assert result.npu_operator_count == 15
+    assert runner.built_models[0].name == "model_npu.tflite"
+
+
+def test_an_npu_build_failure_is_recorded_without_failing_the_iteration(tmp_path, monkeypatch):
+    from pipeline.runners.base import BuildResult
+
+    result = measure_on_npu(
+        tmp_path, monkeypatch, FakeNpuRunner(BuildResult(success=False, error_message="no PADV2"))
+    )
+
+    assert result.status is IterationStatus.SUCCESS
+    assert result.npu_failure_message == "Build failed: no PADV2"
+
+
+def test_an_npu_run_failing_without_a_message_is_still_recorded(tmp_path, monkeypatch):
+    from pipeline.runners.base import BuildResult, ExecutionResult
+
+    runner = FakeNpuRunner(BuildResult(success=True), ExecutionResult(success=False))
+
+    result = measure_on_npu(tmp_path, monkeypatch, runner)
+
+    assert result.npu_failure_message == "Run failed"
+
+
+def test_npu_version_check_uses_zephyr_base_from_the_environment_without_a_runner_tree(
+    tmp_path, monkeypatch
+):
+    from pipeline.runners.base import BuildResult
+
+    monkeypatch.setenv("ZEPHYR_BASE", str(tmp_path / "zephyr"))
+    zephyr_bases = []
+
+    measure_on_npu(
+        tmp_path, monkeypatch, FakeNpuRunner(BuildResult(success=False)), zephyr_bases
+    )
+
+    assert zephyr_bases == [tmp_path / "zephyr"]
+
+
+def test_npu_results_reach_the_result_file():
+    result = make_result(npu_latency_ms=0.386, npu_accuracy_value=1.0, npu_accuracy_sample_count=60)
+
+    assert result.to_dict()["npu"]["latency_ms"] == 0.386
+
+
+def test_a_cpu_only_result_carries_no_npu_block():
+    assert make_result().to_dict()["npu"] is None

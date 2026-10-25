@@ -503,3 +503,24 @@ def test_the_prompt_tells_the_agent_when_its_best_two_results_are_not_separated(
     assert "± 0.010600" in prompt
     assert "differ by less than the standard error" in prompt
     assert "Chasing a difference that small" in prompt
+
+
+def test_the_agent_is_shown_the_previous_iteration_on_the_accelerator():
+    from pipeline.agents.base import BaseAgent
+
+    lines = BaseAgent._describe_previous_iteration(
+        {
+            "previous_iteration": {
+                "status": "success",
+                "metrics": {"accuracy_value": 1.0, "latency_ms": 6.95},
+                "npu_operator_count": 15,
+                "npu": {"latency_ms": 0.386, "accuracy_value": 0.333333,
+                        "accuracy_sample_count": 60, "failure": None},
+            }
+        }
+    )
+
+    assert (
+        "- On the accelerator: latency 0.386 ms, metric 0.333333 on 60 samples scored on "
+        "the board, 15 operators on the accelerator"
+    ) in lines

@@ -1,7 +1,7 @@
 # _____________________________________________________________________________
 #
 # @file zephyr.py
-# @brief Shared Zephyr build behaviour for the QEMU and hardware runners
+# @brief Shared Zephyr build behavior for the QEMU and hardware runners
 # @version 0.1
 # @date 2025-08-23
 # _____________________________________________________________________________
@@ -10,7 +10,7 @@
 # _____________________________________________________________________________
 
 """
-Shared Zephyr build behaviour for the QEMU and hardware runners.
+Shared Zephyr build behavior for the QEMU and hardware runners.
 
 Both targets generate the same application, invoke west the same way and read memory
 usage out of the same build output; only the board and the way results are collected
@@ -22,6 +22,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -52,6 +53,10 @@ class ZephyrRunner(BaseRunner):
     # Set by the caller when the board has an accelerator and the run asked for it.
     uses_neutron = False
 
+    #  Only hardware carries the ML Vibro Sens Click; HILRunner overrides
+    # this from the configuration.
+    uses_vibration = False
+
     def __init__(
         self,
         config: PipelineConfig,
@@ -81,7 +86,9 @@ class ZephyrRunner(BaseRunner):
         Distinct per runner: in auto mode the QEMU and hardware runners are both live,
         and one shared directory would have them wiping each other's build.
         """
-        return self.board.replace("/", "_")
+        #  A CPU & an NPU build of the same board run side by side.
+        suffix = "_npu" if self.uses_neutron else ""
+        return self.board.replace("/", "_") + suffix
 
     @property
     def west_build_dir(self) -> Path:
@@ -134,6 +141,7 @@ class ZephyrRunner(BaseRunner):
                 benchmark_runs=self.config.execution_environment.benchmark_runs,
                 is_interactive=self.is_interactive,
                 uses_neutron=self.uses_neutron,
+                vibration=self.config.vibration if self.uses_vibration else None,
             )
             is_pristine = True
 
@@ -154,6 +162,31 @@ class ZephyrRunner(BaseRunner):
 
         return result
 
+    def build_capture_firmware(self, build_dir: Path) -> BuildResult:
+        """ Build the application with its placeholder model & the
+        vibration commands, for recording windows before any model is trained."""
+        self._shared_build_dir = build_dir
+        self._shared_build_dir.mkdir(parents=True, exist_ok=True)
+
+        self.firmware.prepare_app(
+            self.app_dir,
+            tflite_path=None,
+            tensor_arena_bytes=self.config.hardware.tensor_arena_kb * 1024,
+            benchmark_runs=self.config.execution_environment.benchmark_runs,
+            is_interactive=True,
+            vibration=self.config.vibration,
+        )
+        return self._run_west_build(is_pristine=True)
+
+    def build_saved_app(self, app_source: Path, build_dir: Path) -> BuildResult:
+        """ Rebuild an iteration's saved app_src tree, whose generated
+        files already carry that iteration's model & settings."""
+        self._shared_build_dir = build_dir
+        self._shared_build_dir.mkdir(parents=True, exist_ok=True)
+
+        shutil.copytree(app_source, self.app_dir, dirs_exist_ok=True)
+        return self._run_west_build(is_pristine=True)
+
     def _run_west_build(self, is_pristine: bool) -> BuildResult:
         """Invoke west build for the configured board."""
         env = os.environ.copy()
@@ -171,9 +204,20 @@ class ZephyrRunner(BaseRunner):
         if is_pristine:
             command.append("--pristine")
 
+        cmake_arguments = []
         if self.uses_neutron:
             # Pulls in the NPU driver and the TFLM integration from hal_nxp.
-            command += ["--", "-DCONFIG_TFLM_NXP_NEUTRON=y"]
+            cmake_arguments.append("-DCONFIG_TFLM_NXP_NEUTRON=y")
+
+        if self.uses_vibration:
+            #  Both paths resolve against the application directory.
+            cmake_arguments += [
+                "-DEXTRA_DTC_OVERLAY_FILE=vibration.overlay",
+                "-DEXTRA_CONF_FILE=vibration.conf",
+            ]
+
+        if cmake_arguments:
+            command += ["--", *cmake_arguments]
 
         timeout_s = self.config.execution_environment.build_timeout_s
         logger.info(f"Running: {' '.join(command)}")
@@ -259,7 +303,7 @@ class ZephyrRunner(BaseRunner):
     def _parse_stat_file(content: str) -> tuple[int | None, int | None]:
         """Sum LOAD segments from readelf output in zephyr.stat.
 
-        A segment whose physical and virtual addresses differ is initialised data: it
+        A segment whose physical and virtual addresses differ is initialized data: it
         occupies flash in the image and RAM at run time, so it counts towards both.
         Otherwise an executable segment is flash and the rest is RAM.
         """

@@ -18,7 +18,7 @@ variable read at import, the absl Python logger, Keras's export messages, and th
 warnings module. Verbosity therefore lives here rather than in the logging setup.
 
 It is configured in pyproject.toml rather than the pipeline YAML because it changes
-nothing about the run: a quiet run and a loud one produce identical artefacts, and the
+nothing about the run: a quiet run and a loud one produce identical artifacts, and the
 YAML is the contract for what the pipeline does, not for how much it says.
 """
 
@@ -121,7 +121,7 @@ def configure_output(verbosity: Verbosity) -> None:
     for library in NOISY_LIBRARIES:
         logging.getLogger(library).setLevel(logging.WARNING)
 
-    # The converter warns about missing input statistics on every quantisation, and
+    # The converter warns about missing input statistics on every quantization, and
     # nothing in the pipeline acts on it.
     for module in ("tensorflow.*", "keras.*"):
         warnings.filterwarnings("ignore", category=UserWarning, module=module)
@@ -160,8 +160,8 @@ def quieten_tensorflow(tf_module) -> None:
 def suppressed_native_output(description: str) -> Iterator[None]:
     """Capture writes that native code makes straight to the process's file descriptors.
 
-    TensorFlow prints some lines before absl is initialised, and the converter prints
-    its quantisation summary to stdout, so neither honours any logger. Redirecting the
+    TensorFlow prints some lines before absl is initialized, and the converter prints
+    its quantization summary to stdout, so neither honors any logger. Redirecting the
     descriptors is the only way to reach them.
 
     The output is captured rather than discarded: it is logged at debug level, and at

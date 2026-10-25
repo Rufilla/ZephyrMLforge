@@ -1,0 +1,35 @@
+/*
+ * Copyright (c) 2024 ZephyrMLForge
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ *  ML Vibro Sens Click on the mikroBUS socket of an FRDM-MCXN947. Pin
+ * numbers follow the board's mikrobus_header map: 2 is CS, 6 is PWM.
+ */
+
+/ {
+	zephyr,user {
+		balanced-motor-gpios = <&mikrobus_header 2 GPIO_ACTIVE_HIGH>;
+		unbalanced-motor-gpios = <&mikrobus_header 6 GPIO_ACTIVE_HIGH>;
+	};
+};
+
+&mikrobus_i2c {
+	status = "okay";
+	/*  Each sample is two transfers; at the board's default 100 kHz they
+	 * take about a millisecond, the whole period at 1 kHz. */
+	clock-frequency = <I2C_BITRATE_FAST>;
+
+	mlforge_accel: fxls8974@18 {
+		compatible = "nxp,fxls8974";
+		reg = <0x18>;
+		/*  At +-2 g about a tenth of the unbalanced motor's samples clip.
+		 * The driver ignores this property; vibration.cpp applies it. */
+		range = <8>;
+	};
+};
+
+/*  SAI1 muxes P3_19, the mikroBUS PWM pin, as SAI1_RX_FS, which would
+ * leave the unbalanced motor unreachable. This application uses no audio. */
+&sai1 {
+	status = "disabled";
+};

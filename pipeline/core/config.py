@@ -13,7 +13,7 @@
 Configuration schema and validation for the pipeline.
 
 This module defines the Pydantic models that validate YAML configuration files.
-The YAML file is the authoritative contract, so every tunable the pipeline honours
+The YAML file is the authoritative contract, so every tunable the pipeline honors
 is declared here, with its own field description.
 """
 
@@ -74,10 +74,16 @@ class DatasetSource(str, Enum):
     SYNTHETIC = "synthetic"
     MNIST = "mnist"
     FASHION_MNIST = "fashion_mnist"
+    VIBRATION = "vibration"
 
     @property
     def is_image(self) -> bool:
-        """True for the image datasets, which are always classification."""
+        """ True for the image datasets."""
+        return self in (DatasetSource.MNIST, DatasetSource.FASHION_MNIST)
+
+    @property
+    def is_classification(self) -> bool:
+        """ True for every real dataset; only synthetic data does regression."""
         return self is not DatasetSource.SYNTHETIC
 
 
@@ -123,7 +129,13 @@ class ExecutionConfig(BaseModel):
     """Execution unit configuration."""
 
     cpu: bool = Field(default=True, description="Enable CPU execution")
-    npu: bool = Field(default=False, description="Enable NPU execution")
+    npu: bool = Field(
+        default=True,
+        description=(
+            "Also measure each model on the board's NPU, after the CPU; ignored with a "
+            "notice on a board without one"
+        ),
+    )
 
 
 class ExecutionEnvironmentConfig(BaseModel):
@@ -156,7 +168,7 @@ class AccuracyConfig(BaseModel):
     """
 
     metric: AccuracyMetric = Field(..., description="Metric type")
-    target: float = Field(..., description="Value to optimise toward")
+    target: float = Field(..., description="Value to optimize toward")
     max_error: float = Field(..., description="Worst acceptable value; beyond this is rejected")
     evaluate_on_device: bool = Field(
         default=False,
@@ -320,7 +332,8 @@ class DatasetConfig(BaseModel):
     """Which dataset to train on, and how much of it."""
 
     source: DatasetSource = Field(
-        default=DatasetSource.SYNTHETIC, description="synthetic | mnist | fashion_mnist"
+        default=DatasetSource.SYNTHETIC,
+        description="synthetic | mnist | fashion_mnist | vibration",
     )
     train_samples: int = Field(
         default=6000, gt=0, description="Training images drawn from the set, for tractable runs"
@@ -334,6 +347,60 @@ class DatasetConfig(BaseModel):
             "cannot separate models a point apart"
         ),
     )
+
+
+class VibrationConfig(BaseModel):
+    """ Recording & windowing for the ML Vibro Sens Click, used when
+    dataset.source is 'vibration'."""
+
+    recording: str = Field(
+        default="data/vibration.npz",
+        description="Recording written by 'zephyr-ml-forge capture', relative to the cwd",
+    )
+    sample_rate_hz: int = Field(
+        default=1000, gt=0, le=3200, description="Accelerometer samples per second"
+    )
+    window_samples: int = Field(
+        default=128, gt=0, description="Samples per window; each carries three axes"
+    )
+    windows_per_class: int = Field(
+        default=200, gt=0, description="Windows recorded for each motor state"
+    )
+    rounds: int = Field(
+        default=5,
+        ge=2,
+        description=(
+            "Passes through the motor states during capture, so that drift over the "
+            "session is spread across every class instead of separating them"
+        ),
+    )
+    val_rounds: int = Field(
+        default=1,
+        ge=1,
+        description=(
+            "Final rounds of each session held out for validation. Windows within a "
+            "round are recorded seconds apart, so a random split would score the model "
+            "on near-copies of its training data"
+        ),
+    )
+    settle_s: float = Field(
+        default=1.0, ge=0, description="Seconds a motor runs before its windows are kept"
+    )
+
+    @property
+    def window_values(self) -> int:
+        """ Values in one window, three axes per sample."""
+        return self.window_samples * 3
+
+    @model_validator(mode="after")
+    def validate_rounds(self) -> "VibrationConfig":
+        """ Check that training keeps at least one round."""
+        if self.val_rounds >= self.rounds:
+            raise ValueError(
+                f"vibration.val_rounds ({self.val_rounds}) must be below vibration.rounds "
+                f"({self.rounds}), or nothing is left to train on"
+            )
+        return self
 
 
 class TaskDescription(BaseModel):
@@ -410,7 +477,7 @@ class UserConfig(BaseModel):
     """User credentials.
 
     The password is held as a ``SecretStr`` so that it cannot reach a log line or an
-    artefact by accident; ``password_reference`` keeps the unexpanded '${VAR}' form so
+    artifact by accident; ``password_reference`` keeps the unexpanded '${VAR}' form so
     configuration snapshots stay replayable without carrying the secret.
     """
 
@@ -456,6 +523,7 @@ class PipelineConfig(BaseModel):
     iteration: IterationConfig = Field(default_factory=IterationConfig)
     training: TrainingConfig = Field(default_factory=TrainingConfig)
     dataset: DatasetConfig = Field(default_factory=DatasetConfig)
+    vibration: VibrationConfig = Field(default_factory=VibrationConfig)
     synthetic_data: SyntheticDataConfig
     build: BuildConfig = Field(default_factory=BuildConfig)
     user: UserConfig = Field(default_factory=UserConfig)
@@ -483,7 +551,7 @@ class PipelineConfig(BaseModel):
     @model_validator(mode="after")
     def validate_dataset_pairing(self) -> "PipelineConfig":
         """Check the task and metric suit the dataset."""
-        if not self.dataset.source.is_image:
+        if not self.dataset.source.is_classification:
             return self
 
         if self.synthetic_data.task is not SyntheticTask.CLASSIFICATION:
@@ -514,7 +582,7 @@ class PipelineConfig(BaseModel):
         A target at or below the noise floor is never reached, so the run always
         spends its whole iteration budget however good the models are.
         """
-        if self.dataset.source.is_image:
+        if self.dataset.source.is_classification:
             return None
 
         floor = self.synthetic_data.irreducible_error(self.accuracy.metric)
@@ -551,7 +619,7 @@ class PipelineConfig(BaseModel):
 
         The snapshot is replayable: an environment-referenced password is written back as
         its '${VAR}' reference, and a literal one is written as an empty string rather
-        than copied into the artefact.
+        than copied into the artifact.
         """
         data = self.model_dump(mode="json")
         data["user"]["password"] = self.user.password_reference
@@ -559,7 +627,7 @@ class PipelineConfig(BaseModel):
             yaml.dump(data, f, default_flow_style=False, sort_keys=False)
 
     def get_constraints_summary(self, task_description: TaskDescription | None = None) -> dict:
-        """Summarise the constraints handed to the AI agent.
+        """Summarize the constraints handed to the AI agent.
 
         Credentials are deliberately absent; this dictionary is sent to a third-party API.
         """

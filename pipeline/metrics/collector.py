@@ -479,6 +479,7 @@ class MetricsCollector:
                     timestamp=data["timestamp"],
                     status=data["status"],
                     accuracy_value=metrics["accuracy_value"],
+                    accuracy_standard_error=metrics.get("accuracy_standard_error"),
                     latency_ms=metrics["latency_ms"],
                     ram_usage_kb=metrics["ram_usage_kb"],
                     flash_usage_kb=metrics["flash_usage_kb"],

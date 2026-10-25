@@ -4,7 +4,7 @@
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Prints the first directory that looks like an initialised west workspace.
+# Prints the first directory that looks like an initialized west workspace.
 mlforge_find_workspace() {
     local candidate
     for candidate in \

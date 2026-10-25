@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import shutil
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -130,6 +131,16 @@ class IterationResult:
     accelerator: str = "cpu"
     npu_operator_count: int | None = None
 
+    #  The same model compiled for the NPU & measured after the CPU run.
+    # Accuracy here is scored on the board: the host cannot execute the NPU's operator.
+    npu_latency_ms: float | None = None
+    npu_accuracy_value: float | None = None
+    npu_accuracy_standard_error: float | None = None
+    npu_accuracy_sample_count: int | None = None
+    npu_ram_usage_kb: int | None = None
+    npu_flash_usage_kb: int | None = None
+    npu_failure_message: str | None = None
+
     # Training budget, and whether it rather than convergence ended the fit
     epochs_trained: int | None = None
     is_under_trained: bool = False
@@ -185,6 +196,17 @@ class IterationResult:
             "execution_env": self.execution_env,
             "accelerator": self.accelerator,
             "npu_operator_count": self.npu_operator_count,
+            "npu": {
+                "latency_ms": self.npu_latency_ms,
+                "accuracy_value": self.npu_accuracy_value,
+                "accuracy_standard_error": self.npu_accuracy_standard_error,
+                "accuracy_sample_count": self.npu_accuracy_sample_count,
+                "ram_usage_kb": self.npu_ram_usage_kb,
+                "flash_usage_kb": self.npu_flash_usage_kb,
+                "failure": self.npu_failure_message,
+            }
+            if self.npu_latency_ms is not None or self.npu_failure_message
+            else None,
             "epochs_trained": self.epochs_trained,
             "is_under_trained": self.is_under_trained,
             "artifact_dir": str(self.artifact_dir) if self.artifact_dir else None,
@@ -194,7 +216,7 @@ class IterationResult:
         """Check the iteration against every hard limit.
 
         An unmeasured metric is a violation, not a pass: treating a missing accuracy as
-        satisfied marked untested models as successes and left the agent optimising
+        satisfied marked untested models as successes and left the agent optimizing
         against a number nobody had.
         """
         violations = []
@@ -232,7 +254,7 @@ class IterationResult:
         return len(violations) == 0, violations
 
     def meets_targets(self, config: PipelineConfig) -> bool:
-        """Check the iteration against the optimisation target, not just the limits."""
+        """Check the iteration against the optimization target, not just the limits."""
         if self.accuracy_value is None:
             return False
 
@@ -337,6 +359,7 @@ class Pipeline:
         artifacts_dir: Path,
         task_description: TaskDescription | None = None,
         board: BoardCapabilities | None = None,
+        npu_runner: "BaseRunner | None" = None,
     ):
         self.config = config
         self.agent = agent
@@ -348,6 +371,9 @@ class Pipeline:
         self.task_description = task_description or TaskDescription.discover()
         self.board = board or BoardCapabilities()
 
+        #  Set when every model is also measured on the NPU after the CPU.
+        self.npu_runner = npu_runner
+
         self.state = PipelineState(config=config)
         self._input_shape: tuple[int, ...] = ()
         self._class_count: int | None = None
@@ -356,8 +382,11 @@ class Pipeline:
 
     @property
     def uses_npu(self) -> bool:
-        """True when the run asked for an accelerator and the board has one."""
-        return self.config.execution.npu and self.board.has_npu
+        """ True when the main runner targets the NPU, which it does only
+        when the run disables the CPU; otherwise the NPU is measured by npu_runner."""
+        return (
+            self.config.execution.npu and self.board.has_npu and not self.config.execution.cpu
+        )
 
     def run(self) -> PipelineState:
         """Run the pipeline iteration loop."""
@@ -615,6 +644,9 @@ class Pipeline:
                     f"latency={result.latency_ms:.3f}ms"
                 )
 
+            if self.npu_runner is not None:
+                self._measure_on_npu(tflite_path, iter_dir, result, val_data)
+
             self.metrics_collector.record(result)
 
         except Exception as error:
@@ -640,21 +672,89 @@ class Pipeline:
         if not self.uses_npu:
             return tflite_path
 
+        result.accelerator = self.board.accelerator.value
+        return self._compile_npu_model(tflite_path, iter_dir, result)
+
+    def _compile_npu_model(
+        self, tflite_path: Path, iter_dir: Path, result: IterationResult
+    ) -> Path:
+        """ Compile for the board's NPU & record how many operators it took.
+
+        Raises:
+            NeutronCompilerError: the compiler is missing or refused the model.
+        """
         from ..models.neutron import compile_for_neutron
 
         logger.info(f"Compiling for the {self.board.accelerator.value} accelerator")
         npu_path = iter_dir / "model_npu.tflite"
-        neutron = compile_for_neutron(tflite_path, npu_path, self.board.neutron_target)
+        zephyr_base = getattr(self.npu_runner or self.runner, "zephyr_base", None) or (
+            Path(os.environ["ZEPHYR_BASE"]) if os.environ.get("ZEPHYR_BASE") else None
+        )
+        if zephyr_base is None:
+            logger.warning(
+                "No Zephyr tree to read the Neutron driver blob's version from; the "
+                "converter's version is unchecked, & a mismatch gives wrong outputs"
+            )
+        neutron = compile_for_neutron(
+            tflite_path, npu_path, self.board.neutron_target, zephyr_base=zephyr_base
+        )
 
-        result.accelerator = self.board.accelerator.value
         result.npu_operator_count = neutron.converted_operator_count
-
         return npu_path
+
+    def _measure_on_npu(
+        self,
+        tflite_path: Path,
+        iter_dir: Path,
+        result: IterationResult,
+        val_data: tuple,
+    ) -> None:
+        """ Build, flash & measure the NPU-compiled model.
+
+        The CPU result alone decides the iteration's status, so an NPU failure is
+        recorded on the result rather than raised.
+        """
+        try:
+            npu_model = self._compile_npu_model(tflite_path, iter_dir, result)
+
+            build_dir = self.config.build.get_build_path() / f"{iter_dir.name}_npu"
+            build_dir.mkdir(parents=True, exist_ok=True)
+            build_result = self.npu_runner.build(npu_model, build_dir, host_model_path=tflite_path)
+            if not build_result.success:
+                result.npu_failure_message = f"Build failed: {build_result.error_message}"
+                return
+
+            result.npu_ram_usage_kb = build_result.ram_usage_kb
+            result.npu_flash_usage_kb = build_result.flash_usage_kb
+
+            logger.info("Running inference on the NPU")
+            exec_result = self.npu_runner.run(build_dir, val_data)
+            if not exec_result.success:
+                result.npu_failure_message = exec_result.error_message or "Run failed"
+                return
+        except Exception as error:
+            logger.exception("NPU measurement failed")
+            result.npu_failure_message = str(error) or type(error).__name__
+            return
+
+        result.npu_latency_ms = exec_result.latency_ms
+        result.npu_accuracy_value = exec_result.accuracy_value
+        result.npu_accuracy_standard_error = exec_result.accuracy_standard_error
+        result.npu_accuracy_sample_count = exec_result.accuracy_sample_count
+        logger.info(
+            f"NPU: latency={result.npu_latency_ms:.3f}ms, "
+            f"{self.config.accuracy.metric.value}={result.npu_accuracy_value} on the board"
+        )
 
     def _build_agent_context(self) -> dict[str, Any]:
         """Build the context dictionary handed to the AI agent."""
+        constraints = self.config.get_constraints_summary(self.task_description)
+        #  execution.npu is on by default, so it says only that an NPU was
+        # asked for; the agent is told of one when this run will actually measure it.
+        constraints["hardware"]["npu_enabled"] = self.uses_npu or self.npu_runner is not None
+
         context = {
-            "constraints": self.config.get_constraints_summary(self.task_description),
+            "constraints": constraints,
             "iteration": self.state.current_iteration,
             "max_iterations": self.config.iteration.max_iterations,
             "task": {

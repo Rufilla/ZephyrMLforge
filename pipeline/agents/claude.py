@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 class ClaudeAgent(BaseAgent):
     """AI agent implementation using Anthropic's Claude API."""
 
-    DEFAULT_MODEL = "claude-sonnet-5"
+    DEFAULT_MODEL = "claude-sonnet-5-5"
 
     def __init__(self, api_key: str, config: AIAgentConfig | None = None):
         super().__init__(api_key, config)

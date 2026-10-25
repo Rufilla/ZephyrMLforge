@@ -73,7 +73,7 @@ def score_predictions(
         The metric value and its standard error. Lower is better except for ``accuracy``.
 
     Raises:
-        ValueError: prediction and label shapes disagree after normalisation.
+        ValueError: prediction and label shapes disagree after normalization.
     """
     per_sample = _per_sample_scores(predictions, labels, metric)
 
@@ -104,7 +104,7 @@ def _per_sample_scores(
     """One score per sample, whose mean is the metric.
 
     Raises:
-        ValueError: prediction and label shapes disagree after normalisation.
+        ValueError: prediction and label shapes disagree after normalization.
     """
     predictions = np.asarray(predictions)
     labels = np.asarray(labels)
@@ -160,7 +160,7 @@ def predict_tflite(tflite_path: Path, features: np.ndarray) -> np.ndarray:
     refuses the resize is run a sample at a time instead.
 
     Returns:
-        Dequantised outputs, shape (samples, outputs).
+        Dequantized outputs, shape (samples, outputs).
 
     Raises:
         RuntimeError: TensorFlow is not installed.

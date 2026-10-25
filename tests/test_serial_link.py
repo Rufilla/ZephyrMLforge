@@ -63,8 +63,10 @@ class FakeDevice:
             return "PONG\n"
         if command == "BENCH":
             return METRICS_BLOCK
-        if command.startswith("INFER"):
+        if command.startswith("INFER") or command == "INVOKE":
             return "OUT=0.482906\n"
+        if command.startswith("LOAD"):
+            return f"OK loaded={len(command.split(' ', 2)[2].split(','))}\n"
         return "ERR=unknown_command\n"
 
     def close(self) -> None:
@@ -161,3 +163,91 @@ def test_a_board_that_stops_reading_is_reported_rather_than_blocking(monkeypatch
                 link.request_inference([0.5])
     finally:
         fake.close()
+
+
+def test_motor_command_reads_past_the_echo_to_its_acknowledgement():
+    fake = FakeDevice(replies={"MOTOR 2": "OK\n"})
+    try:
+        with DeviceLink(fake.port, 115200) as link:
+            link.set_motors(2)
+    finally:
+        fake.close()
+
+    assert fake.received == ["MOTOR 2"]
+
+
+def test_motor_command_on_firmware_without_vibration_support_is_an_error(device):
+    with DeviceLink(device.port, 115200) as link:
+        with pytest.raises(DeviceError, match="Board rejected MOTOR: ERR=unknown_command"):
+            link.set_motors(1)
+
+
+def test_window_returns_its_duration_and_values():
+    #  The echo 'WINDOW' also starts with 'WINDOW', so the reply is told
+    # apart by its 'us=' field.
+    fake = FakeDevice(replies={"WINDOW": "WINDOW us=128500 v=0.012,-0.034,1.500\n"})
+    try:
+        with DeviceLink(fake.port, 115200) as link:
+            assert link.capture_window() == (128500, [0.012, -0.034, 1.5])
+    finally:
+        fake.close()
+
+
+def test_window_overrun_is_raised_not_parsed():
+    fake = FakeDevice(replies={"WINDOW": "ERR=sample_overrun rate_hz=1000\n"})
+    try:
+        with DeviceLink(fake.port, 115200) as link:
+            with pytest.raises(DeviceError, match="sample_overrun"):
+                link.capture_window()
+    finally:
+        fake.close()
+
+
+def test_classify_returns_the_class_scores():
+    fake = FakeDevice(replies={"CLASSIFY": "OUT=0.1,0.0,0.8,0.1\n"})
+    try:
+        with DeviceLink(fake.port, 115200) as link:
+            assert link.classify() == [0.1, 0.0, 0.8, 0.1]
+    finally:
+        fake.close()
+
+
+def test_long_inputs_are_sent_as_load_lines_short_enough_for_the_console(device):
+    #  Zephyr's uart_console wraps a line past 255 characters.
+    with DeviceLink(device.port, 115200) as link:
+        outputs = link.request_inference([0.5] * 45)
+
+    assert outputs == [0.482906]
+    assert [command.split(" ")[:2] for command in device.received] == [
+        ["LOAD", "0"], ["LOAD", "26"], ["INVOKE"]
+    ]
+    assert max(len(command) for command in device.received) < 256
+
+
+def test_a_board_loading_fewer_inputs_than_sent_fails_the_inference(device):
+    device.replies["LOAD 26 " + ",".join(["0.500000"] * 19)] = "OK loaded=4\n"
+
+    with DeviceLink(device.port, 115200) as link:
+        with pytest.raises(DeviceError, match="Board loaded 4 of the 19 inputs sent from offset 26"):
+            link.request_inference([0.5] * 45)
+
+    assert "INVOKE" not in device.received
+
+
+def test_load_lines_stay_short_when_values_are_wide(device):
+    #  -123.456789 is 11 characters; a fixed count of values a line would
+    # pass 255 here.
+    with DeviceLink(device.port, 115200) as link:
+        link.request_inference([-123.456789] * 384)
+
+    loads = [command for command in device.received if command.startswith("LOAD")]
+    assert max(len(command) for command in loads) <= 240
+    assert sum(len(command.split(" ", 2)[2].split(",")) for command in loads) == 384
+
+
+def test_short_inputs_still_go_as_one_infer_line(device):
+    with DeviceLink(device.port, 115200) as link:
+        link.request_inference([0.5] * 20)
+
+    assert len(device.received) == 1
+    assert device.received[0].startswith("INFER ")

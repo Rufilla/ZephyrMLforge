@@ -16,7 +16,8 @@ https://github.com/user-attachments/assets/6383cdc1-2c8c-4eb5-87e8-6c863c5d1080
 
 1. **Proposes** an architecture with an AI agent (the Claude or ChatGPT APIs, a local
    Claude Code installation, or an offline pseudo agent)
-2. **Trains** it with early stopping, on synthetic data or on MNIST / Fashion-MNIST
+2. **Trains** it with early stopping, on synthetic data, on MNIST / Fashion-MNIST, or on
+   accelerometer windows recorded from an ML Vibro Sens Click
 3. **Quantises** it to int8 TFLite
 4. **Builds & runs** the real TFLite Micro firmware, under QEMU or on hardware
 5. **Measures** inference latency on the target, & the error of the quantised model
@@ -29,13 +30,11 @@ See [`docs/program_flow.md`](docs/program_flow.md) for the full flow.
 
 - It does not sandbox the agent. Generated Python is executed in the pipeline's own
   process; run it only with a provider & key you trust.
-- It does not yet execute on the NPU. The accelerator path is built & boards declare
-  their accelerator in `pyproject.toml`, but on the FRDM-MCXN947, the only NPU board
-  tried, neither converter version tested (3.0.0, 3.2.2) produces a model that runs
-  against NXP's current driver blobs & TFLM integration — see
-  [Neural accelerators](#neural-accelerators).
-- It does not fetch arbitrary datasets. `dataset.source` takes `synthetic`, `mnist` or
-  `fashion_mnist`; anything else means writing a loader.
+- It does not trust the NPU. A compiled model can run fast & answer wrongly, so its
+  accuracy is scored on the board, & only the CPU result decides whether an iteration
+  passes — see [Neural accelerators](#neural-accelerators).
+- It does not fetch arbitrary datasets. `dataset.source` takes `synthetic`, `mnist`,
+  `fashion_mnist` or `vibration`; anything else means writing a loader.
 - It does not hold out a third split. The set that stops training early is the set the
   reported score is measured on, which flatters that score by a fraction of a point.
 
@@ -149,10 +148,13 @@ performance:
   max_flash_kb: 256
 ```
 
-Two templates ship: `config/pipeline_config.yaml`, synthetic regression scored by MSE &
-built from dense layers, & `config/fashion_mnist_config.yaml`, Fashion-MNIST
-classification scored by accuracy, built from convolutions & given a 64 KB tensor arena
-to hold their activations.
+Three templates ship:
+
+| Template | Task | Scored by |
+|---|---|---|
+| `config/pipeline_config.yaml` | Synthetic sine regression, dense layers | MSE |
+| `config/fashion_mnist_config.yaml` | Fashion-MNIST, convolutions in a 64 KB tensor arena | Accuracy |
+| `config/vibration_config.yaml` | Which motors are running, from a recorded accelerometer — see [Vibration demo](#vibration-demo) | Accuracy |
 
 For `metric: accuracy` the two bounds invert: `target` is the accuracy to reach &
 `max_error` is the lowest still accepted. That pairing is checked at load time, as is a
@@ -212,6 +214,51 @@ bytes of tensor arena, 68 KB RAM & 175 KB flash. Host & device predictions agree
 within 5e-7 on every input tried, so the host figure is a fair stand-in for the device
 one on this model.
 
+## Vibration demo
+
+The third template trains on real sensor data: an
+[ML Vibro Sens Click](https://www.mikroe.com/ml-vibro-sens-click) on the FRDM-MCXN947's
+mikroBUS socket. The click carries an FXLS8974 accelerometer & two motors, one balanced
+& one unbalanced, which the firmware switches itself, so every recorded window is
+labelled by the motor that was running. The model learns to tell off, balanced &
+unbalanced apart.
+
+Record, train, then classify live windows:
+
+```bash
+zephyr-ml-forge capture                  # about 14 minutes; writes data/vibration.npz
+zephyr-ml-forge run -c config/vibration_config.yaml
+zephyr-ml-forge demo                     # rebuilds the best iteration & runs it
+```
+
+Measured on one board, with Claude Sonnet 5.5 proposing:
+
+```
+capture   900 windows at 996 Hz; RMS per axis 0.1 m/s² off, 0.8–1.5 balanced, 6–17 unbalanced
+run       iteration 1: 180 of 180 held-out windows correct, 6.95 ms, 95 KB RAM; target met
+demo      60 of 60 live windows correct
+```
+
+A held-out score of 180 of 180 is printed as `1.000000 ± 0.000000`; the formula behind
+the error bar gives zero at 100%. 180 windows bound the true error rate below about 1.7%,
+not at zero.
+
+The recording is split by time, not at random. Capture visits the motor states in
+turn, `vibration.rounds` times, & the final `vibration.val_rounds` rounds are held out:
+windows recorded seconds apart are near-copies of each other, & a random split would
+score the model on its own training data. The split matters on this hardware, because
+the unbalanced motor speeds up as it warms: over one 8-minute session its fundamental
+rose from 134 Hz to 156 Hz.
+
+Not a class: both motors at once, which the firmware refuses. In an earlier recording of
+all four states the balanced motor carried 1–3% of the vibration power
+& did not show reliably under the unbalanced one; the best model scored 84.6% ± 2.3%, &
+every one of its errors was between those two states. Sampling above 1 kHz might change
+that; it has not been tried.
+
+The overlay & firmware changes the click needs, including SAI1 holding its PWM pin, are
+in [Firmware source](zephyr_app/README.md#vibration-commands).
+
 ## Output
 
 Each iteration writes `artifacts/iteration_XXXX/`:
@@ -252,15 +299,29 @@ accelerator = "neutron"
 neutron_target = "mcxn94x"     # neutron_compiler --show-targets lists them
 ```
 
-A run asks for it with `execution.npu: true`. Asking on a board with none is refused at
-start-up, naming the boards that have one; an unlisted board is assumed to have none, so
-it runs on its CPU rather than failing.
+With `execution.cpu` & `execution.npu` both true, the default in every template, each
+model is measured twice: built & run on the CPU, then compiled for the NPU, built, flashed
+& run again. The CPU result alone decides whether the iteration passes its limits; the
+NPU's latency, memory & accuracy are reported beside it & passed to the agent, & an NPU
+failure is recorded without failing the iteration. On a board with no accelerator, or
+with no converter installed, the run says so & measures the CPU alone.
 
-On the FRDM-MCXN947 the path is built but not usable: models compile & the firmware
-reports `accelerator=neutron`, but neither converter version tested (3.0.0, 3.2.2)
-produces a model that runs against NXP's current driver blobs & TFLM integration. The
-other declared boards are untested. [Neural accelerators](docs/accelerators.md) carries
-the install, both failure modes & what was excluded by test.
+The NPU's accuracy is always scored on the board, over `accuracy.on_device_samples`
+samples spread across the validation set, because the host cannot execute the compiled
+model's NPU operator & would score the uncompiled one instead. An iteration whose board
+outputs are identical for every sample is recorded as an NPU failure.
+
+The converter's version must match the 3.0.0 driver blobs in `hal_nxp`, so use converter
+3.0.0. A 3.0.1 model passes the driver's version check, then runs wrongly: vibration CNNs
+answered every input with the same scores, & larger models hard-faulted the board.
+[Neural accelerators](docs/accelerators.md) carries the install & the failure modes.
+
+Measured on one FRDM-MCXN947 with converter 3.0.0:
+
+| Model | CPU | NPU | NPU against the host interpreter |
+|---|---|---|---|
+| 16-8 MLP, synthetic sine | 28.3 us | 13.1 us | Within 0.0079, one output step, on 21 inputs |
+| 4-layer (k,1) CNN, vibration | 8.40 ms | 0.52 ms | Identical on 36 windows, 36 correct |
 
 ## Firmware
 
@@ -280,6 +341,13 @@ Convolution runs through the CMSIS-NN kernels, enabled by
 Fashion-MNIST convolutional model: 461.9 ms an inference through the reference kernels,
 25.6 ms through CMSIS-NN. A model that breaches its latency budget on one is comfortable
 on the other, so the setting is not optional in practice.
+
+## Standalone apps
+
+[`apps/`](apps/README.md) holds three Zephyr applications that each run one trained model
+on the board with no host attached: 100 sine predictions, 100 Fashion-MNIST test images,
+& 20 guesses at which motor of the ML Vibro Sens Click is running. Each builds with a
+plain `west build`; `apps/export_models.py` swaps in another iteration's model.
 
 ## Terminal output
 
@@ -313,12 +381,13 @@ produced it failed, so a failed conversion still says why.
 
 ```bash
 pytest -q
-# → 188 passed in 9.8s
+# → 222 passed in 4.1s
 ```
 
 The suite covers the configuration schema, prediction scoring & its error bars, build &
 console output parsing, constraint checking, the board registry, the agent retry loop,
-firmware generation & the serial protocol against a pseudo-terminal. It needs neither
+firmware generation, vibration recording & splitting, & the serial protocol against a
+pseudo-terminal. It needs neither
 TensorFlow nor a board.
 
 ## Supported hardware
@@ -332,7 +401,8 @@ the serial link expects are in [Flashing the FRDM-MCXN947](docs/flashing.md).
 ## Documentation
 
 [Program flow](docs/program_flow.md) · [Neural accelerators](docs/accelerators.md) ·
-[Flashing the FRDM-MCXN947](docs/flashing.md) · [Firmware source](zephyr_app/README.md)
+[Flashing the FRDM-MCXN947](docs/flashing.md) · [Firmware source](zephyr_app/README.md) ·
+[Standalone apps](apps/README.md)
 
 ## Licence
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 import yaml
 
@@ -175,3 +177,28 @@ def test_classification_has_no_additive_noise_floor():
     )
 
     assert config.unreachable_target() is None
+
+
+VIBRATION_OVERRIDES = {
+    "accuracy": {"metric": "accuracy", "target": 0.95, "max_error": 0.80},
+    "synthetic_data": {"task": "classification"},
+    "dataset": {"source": "vibration"},
+}
+
+
+def test_vibration_is_classification():
+    with pytest.raises(ValueError, match="'vibration' is a classification set"):
+        build_config(dataset={"source": "vibration"})
+
+
+def test_rejects_holding_out_every_vibration_round():
+    with pytest.raises(ValueError, match=r"val_rounds \(3\) must be below vibration.rounds \(3\)"):
+        build_config(**VIBRATION_OVERRIDES, vibration={"rounds": 3, "val_rounds": 3})
+
+
+def test_shipped_vibration_template_is_valid():
+    config = PipelineConfig.from_yaml(
+        Path(__file__).resolve().parents[1] / "config" / "vibration_config.yaml"
+    )
+
+    assert config.dataset.source.value == "vibration"

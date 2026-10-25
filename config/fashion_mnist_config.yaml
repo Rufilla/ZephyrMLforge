@@ -12,7 +12,7 @@ hardware:
 
 execution:
   cpu: true
-  npu: false                # true compiles each model for the Neutron NPU
+  npu: true                 #  each model is also measured on the NPU
 
 execution_environment:
   mode: hil

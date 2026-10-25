@@ -304,9 +304,12 @@ EXAMPLE RESPONSE:
 
         if hardware.get("npu_enabled"):
             prompt_parts.append(
-                "NOTE: the board has a neural accelerator, and the quantised model is "
-                "compiled for it after training. Operators it cannot take stay on the "
-                "CPU. Design as normal; no accelerator-specific layers are needed."
+                "NOTE: the board has a neural accelerator. Each model is measured on the "
+                "CPU, which alone decides acceptance, and then compiled for the "
+                "accelerator and measured again, with its accuracy scored on the board. "
+                "Operators the accelerator cannot take stay on the CPU. A model the "
+                "accelerator runs correctly and faster is worth more than one it does "
+                "not; the previous iteration's accelerator results show which it was."
             )
             prompt_parts.append("")
 
@@ -387,6 +390,22 @@ EXAMPLE RESPONSE:
             lines.append(f"- Flash usage: {metrics['flash_usage_kb']} KB")
         if metrics.get("arena_used_bytes") is not None:
             lines.append(f"- Tensor arena used: {metrics['arena_used_bytes']} bytes")
+
+        npu = previous.get("npu")
+        if npu and npu.get("failure"):
+            lines.append(f"- On the accelerator: failed: {npu['failure']}")
+        elif npu and npu.get("latency_ms") is not None:
+            on_board = npu.get("accuracy_value")
+            lines.append(
+                f"- On the accelerator: latency {npu['latency_ms']:.3f} ms, metric "
+                + (
+                    f"{on_board:.6f} on {npu.get('accuracy_sample_count')} samples scored "
+                    "on the board"
+                    if on_board is not None
+                    else "not measured"
+                )
+                + f", {previous.get('npu_operator_count')} operators on the accelerator"
+            )
 
         if previous.get("is_under_trained"):
             lines.append(

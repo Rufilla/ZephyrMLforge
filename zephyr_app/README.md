@@ -13,7 +13,9 @@ failure seen in the pipeline reproduces with a plain `west build` here.
 ```
 zephyr_app/
 ├── CMakeLists.txt          # Build configuration
-├── prj.conf                # Zephyr configuration (no overlay; the app is always TFLite)
+├── prj.conf                # Zephyr configuration
+├── vibration.overlay       # ML Vibro Sens Click pins, FRDM-MCXN947 only
+├── vibration.conf          # Sensor, I2C & GPIO drivers for the click
 └── src/
     ├── app_config.h        # Arena size, benchmark run count & interactive flag
     ├── main.c              # Minimal entry point
@@ -22,7 +24,9 @@ zephyr_app/
     ├── model.hpp           # Model data declarations
     ├── model.cpp           # Compiled model (placeholder sine network)
     ├── output_handler.hpp  # Output handler declarations
-    └── output_handler.cpp  # Metrics output for pipeline parsing
+    ├── output_handler.cpp  # Metrics output for pipeline parsing
+    ├── vibration.h         # Accelerometer windows & motor control declarations
+    └── vibration.cpp       # The same, compiled only when MLFORGE_VIBRATION is 1
 ```
 
 ## Prerequisites
@@ -121,14 +125,59 @@ pipeline uses this when `accuracy.evaluate_on_device` is true.
 | `PING` | `PONG` | Link check |
 | `BENCH` | A METRICS block | Re-runs the latency measurement |
 | `INFER 0.5` | `OUT=0.479019` | One inference; inputs comma-separated, outputs likewise |
+| `LOAD 20 0.1,0.2` | `OK loaded=2` | Writes inputs from index 20 onwards, without running |
+| `INVOKE` | `OUT=0.479019` | Runs on the inputs written so far |
+
+A command line longer than 255 characters wraps: Zephyr's `uart_console.c` tracks its
+position in the line in a `uint8_t`, whatever `CONFIG_CONSOLE_INPUT_MAX_LINE_LEN` says,
+& an over-long `INFER` arrives without its command word & is answered
+`ERR=unknown_command`. The host therefore sends a model with more than about 20 inputs as
+`LOAD` lines of 20 values each, then `INVOKE`.
 
 The block printed at boot is easily missed, because the USB port is still enumerating
 when it is sent; the pipeline asks for a fresh one with `BENCH` rather than racing it.
 
 Malformed input is answered with `ERR=` & a reason (`unknown_command`, `not_ready`,
-`expected_inputs=<n>`, `invoke`). Set `MLFORGE_INTERACTIVE` to 0 in `src/app_config.h`
+`expected_inputs=<n>`, `load_offset=<n>`, `invoke`). Set `MLFORGE_INTERACTIVE` to 0 in `src/app_config.h`
 to compile the command loop out; QEMU builds do this, as the runner has no channel to
 the guest console.
+
+## Vibration commands
+
+Built with `MLFORGE_VIBRATION` set to 1 in `src/app_config.h` & the click's overlay, the
+firmware also drives an ML Vibro Sens Click on the mikroBUS socket. The pipeline does
+both when `dataset.source` is `vibration`; by hand:
+
+```bash
+west build -b frdm_mcxn947/mcxn947/cpu0 zephyr_app --pristine -- \
+    -DEXTRA_DTC_OVERLAY_FILE=vibration.overlay -DEXTRA_CONF_FILE=vibration.conf
+```
+
+| Command | Reply | Meaning |
+|---|---|---|
+| `MOTOR 2` | `OK` | 0 both motors off, 1 balanced only, 2 unbalanced only |
+| `WINDOW` | `WINDOW us=128500 v=0.012,-0.034,...` | One window: its duration & its values, x, y, z interleaved, in m/s² |
+| `CLASSIFY` | `OUT=0.00,0.02,0.98` | Records a window & runs the model on it |
+
+Each axis has its window mean removed on the board, which takes out gravity & the
+sensor's offset; the host trains on the same values the board classifies. The window is
+`MLFORGE_WINDOW_SAMPLES` samples at `MLFORGE_SAMPLE_RATE_HZ`, paced by a kernel timer:
+on the FRDM-MCXN947, 128 samples at 1 kHz took 128.5 ms. A read that overruns its period
+is answered `ERR=sample_overrun`, not with a window at the wrong spacing.
+
+`vibration.overlay` is written for the FRDM-MCXN947, & does three things beyond naming
+the pins:
+
+- Disables SAI1, which otherwise muxes the mikroBUS PWM pin, P3_19, as `SAI1_RX_FS` &
+  leaves the unbalanced motor unreachable
+- Raises the mikroBUS I2C bus to 400 kHz; at the board's 100 kHz a sample's two
+  transfers take about the whole 1 ms period
+- Sets the accelerometer to ±8 g. The largest reading observed next to the unbalanced
+  motor was 27.7 m/s², about 2.8 g, beyond the driver default of ±2 g
+
+The sensor's output rate is set to 3200 Hz by direct register writes, not through
+Zephyr's driver: its rate attribute accepts only `SENSOR_CHAN_ALL`, & writes the rate
+register without first putting the chip in standby.
 
 ## Changing the model by hand
 

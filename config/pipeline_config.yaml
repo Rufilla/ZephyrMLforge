@@ -15,7 +15,7 @@ hardware:
 # Execution unit selection
 execution:
   cpu: true
-  npu: false
+  npu: true                 #  each model is also measured on the NPU
 
 # Execution environment, serial link and subprocess timeouts
 execution_environment:
@@ -96,7 +96,7 @@ synthetic_data:
 
 # User credentials (optional)
 # Use environment variable expansion; a literal password here is never written to
-# an artefact, but it is still plaintext in a version-controlled file.
+# an artifact, but it is still plaintext in a version-controlled file.
 user:
   username: ""
   password: "${AI_PIPELINE_PASSWORD}"
