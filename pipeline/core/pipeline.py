@@ -717,8 +717,9 @@ class Pipeline:
         try:
             npu_model = self._compile_npu_model(tflite_path, iter_dir, result)
 
-            build_dir = self.config.build.get_build_path() / f"{iter_dir.name}_npu"
-            build_dir.mkdir(parents=True, exist_ok=True)
+            # The CPU build's path, reused: the NPU runner builds in its own
+            # shared directory beside it & writes nothing to the path itself.
+            build_dir = self.config.build.get_build_path() / iter_dir.name
             build_result = self.npu_runner.build(npu_model, build_dir, host_model_path=tflite_path)
             if not build_result.success:
                 result.npu_failure_message = f"Build failed: {build_result.error_message}"
