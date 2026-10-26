@@ -131,8 +131,9 @@ pipeline uses this when `accuracy.evaluate_on_device` is true.
 A command line longer than 255 characters wraps: Zephyr's `uart_console.c` tracks its
 position in the line in a `uint8_t`, whatever `CONFIG_CONSOLE_INPUT_MAX_LINE_LEN` says,
 & an over-long `INFER` arrives without its command word & is answered
-`ERR=unknown_command`. The host therefore sends a model with more than about 20 inputs as
-`LOAD` lines of 20 values each, then `INVOKE`.
+`ERR=unknown_command`. The host therefore sends inputs that overflow one 240-character
+line as `LOAD` lines filled to that length, then `INVOKE`. Values go to six decimal
+places, trailing zeros dropped.
 
 The block printed at boot is easily missed, because the USB port is still enumerating
 when it is sent; the pipeline asks for a fresh one with `BENCH` rather than racing it.

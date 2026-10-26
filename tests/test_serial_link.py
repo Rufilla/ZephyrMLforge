@@ -101,7 +101,14 @@ def test_inference_request_sends_every_feature(device):
         outputs = link.request_inference([0.5, -0.25])
 
     assert outputs == [0.482906]
-    assert device.received == ["INFER 0.500000,-0.250000"]
+    assert device.received == ["INFER 0.5,-0.25"]
+
+
+def test_inputs_are_sent_to_six_decimals_without_trailing_zeros(device):
+    with DeviceLink(device.port, 115200) as link:
+        link.request_inference([0.0, 0.0000123, 0.1234567, -123.4567, 20.0])
+
+    assert device.received == ["INFER 0,0.000012,0.123457,-123.4567,20"]
 
 
 def test_inference_reads_past_the_console_echo(device):
@@ -112,7 +119,7 @@ def test_inference_reads_past_the_console_echo(device):
 
 
 def test_multiple_output_values_are_all_returned():
-    fake = FakeDevice(replies={"INFER 0.500000": "OUT=0.1,0.7,0.2\n"})
+    fake = FakeDevice(replies={"INFER 0.5": "OUT=0.1,0.7,0.2\n"})
     try:
         with DeviceLink(fake.port, 115200) as link:
             assert link.request_inference([0.5]) == [0.1, 0.7, 0.2]
@@ -121,7 +128,7 @@ def test_multiple_output_values_are_all_returned():
 
 
 def test_device_error_is_raised_not_parsed():
-    fake = FakeDevice(replies={"INFER 0.500000": "ERR=expected_inputs=2\n"})
+    fake = FakeDevice(replies={"INFER 0.5": "ERR=expected_inputs=2\n"})
     try:
         with DeviceLink(fake.port, 115200) as link:
             with pytest.raises(DeviceError, match="expected_inputs=2"):
@@ -131,7 +138,7 @@ def test_device_error_is_raised_not_parsed():
 
 
 def test_silence_raises_rather_than_hanging():
-    fake = FakeDevice(replies={"INFER 0.500000": ""})
+    fake = FakeDevice(replies={"INFER 0.5": ""})
     try:
         with DeviceLink(fake.port, 115200, read_timeout_s=0.2) as link:
             with pytest.raises(DeviceError, match="No reply to INFER"):
@@ -215,7 +222,7 @@ def test_classify_returns_the_class_scores():
 def test_long_inputs_are_sent_as_load_lines_short_enough_for_the_console(device):
     #  Zephyr's uart_console wraps a line past 255 characters.
     with DeviceLink(device.port, 115200) as link:
-        outputs = link.request_inference([0.5] * 45)
+        outputs = link.request_inference([0.123456] * 45)
 
     assert outputs == [0.482906]
     assert [command.split(" ")[:2] for command in device.received] == [
@@ -225,11 +232,11 @@ def test_long_inputs_are_sent_as_load_lines_short_enough_for_the_console(device)
 
 
 def test_a_board_loading_fewer_inputs_than_sent_fails_the_inference(device):
-    device.replies["LOAD 26 " + ",".join(["0.500000"] * 19)] = "OK loaded=4\n"
+    device.replies["LOAD 26 " + ",".join(["0.123456"] * 19)] = "OK loaded=4\n"
 
     with DeviceLink(device.port, 115200) as link:
         with pytest.raises(DeviceError, match="Board loaded 4 of the 19 inputs sent from offset 26"):
-            link.request_inference([0.5] * 45)
+            link.request_inference([0.123456] * 45)
 
     assert "INVOKE" not in device.received
 

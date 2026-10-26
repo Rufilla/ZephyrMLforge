@@ -155,7 +155,10 @@ class DeviceLink:
         Raises:
             DeviceError: the board reported an error or did not reply in time.
         """
-        values = [f"{value:.6f}" for value in features]
+        # Trailing zeros stripped: a Fashion-MNIST image, over half zeros,
+        # then needed about 18 LOAD lines instead of 32 at the same precision; the
+        # saving comes from exact zeros, so denser inputs gain less.
+        values = [f"{value:.6f}".rstrip("0").rstrip(".") for value in features]
         line = "INFER " + ",".join(values)
 
         if len(line) <= MAX_COMMAND_LENGTH:
