@@ -749,8 +749,8 @@ class Pipeline:
     def _build_agent_context(self) -> dict[str, Any]:
         """Build the context dictionary handed to the AI agent."""
         constraints = self.config.get_constraints_summary(self.task_description)
-        #  execution.npu is on by default, so it says only that an NPU was
-        # asked for; the agent is told of one when this run will actually measure it.
+        # Added here, not in the configuration's summary: execution.npu
+        # only asks for an NPU, & this says whether the run will actually measure one.
         constraints["hardware"]["npu_enabled"] = self.uses_npu or self.npu_runner is not None
 
         context = {

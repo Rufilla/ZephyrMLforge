@@ -646,7 +646,6 @@ class PipelineConfig(BaseModel):
                 "ram_kb": self.hardware.ram_kb,
                 "flash_kb": self.hardware.flash_kb,
                 "cpu_enabled": self.execution.cpu,
-                "npu_enabled": self.execution.npu,
             },
             "accuracy": {
                 "metric": self.accuracy.metric.value,
