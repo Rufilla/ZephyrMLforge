@@ -20,7 +20,6 @@ state that was set while it was taken, so capture needs no rig & no hand labelin
 from __future__ import annotations
 
 import logging
-import math
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -181,7 +180,7 @@ def record(
         DeviceError: the board failed a command, returned a window of the wrong size,
             or sampled away from the configured rate.
     """
-    per_round = math.ceil(config.windows_per_class / config.rounds)
+    per_round = config.windows_per_round
     total = per_round * config.rounds * len(CLASS_NAMES)
 
     windows: list[list[float]] = []

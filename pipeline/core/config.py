@@ -392,6 +392,12 @@ class VibrationConfig(BaseModel):
         """ Values in one window, three axes per sample."""
         return self.window_samples * 3
 
+    @property
+    def windows_per_round(self) -> int:
+        """Windows of each motor state per round, rounded up so
+        that a capture records at least windows_per_class."""
+        return math.ceil(self.windows_per_class / self.rounds)
+
     @model_validator(mode="after")
     def validate_rounds(self) -> "VibrationConfig":
         """ Check that training keeps at least one round."""

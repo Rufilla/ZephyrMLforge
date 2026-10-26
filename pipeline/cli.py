@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import argparse
 import logging
-import math
 import os
 import shutil
 import sys
@@ -532,7 +531,7 @@ def cmd_capture(args: argparse.Namespace) -> int:
         _print_build_failure(result)
         return 1
 
-    per_class = math.ceil(vibration.windows_per_class / vibration.rounds) * vibration.rounds
+    per_class = vibration.windows_per_round * vibration.rounds
     console.print(
         f"[green]Flashing; then recording {per_class} windows of each of "
         f"{', '.join(CLASS_NAMES)} in {vibration.rounds} rounds[/green]"
