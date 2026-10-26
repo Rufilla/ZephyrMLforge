@@ -77,6 +77,7 @@ class HILRunner(ZephyrRunner):
             raise DeviceError(f"Flash failed: {flash_error}")
 
         environment = self.config.execution_environment
+        logger.info("Flashed; waiting for the serial port to come back")
         port = wait_for_serial_port(environment.serial_port, timeout_s=environment.run_timeout_s)
         if port is None:
             raise DeviceError(
@@ -101,27 +102,9 @@ class HILRunner(ZephyrRunner):
                 error_message=f"Built binary not found: {elf_path}",
             )
 
-        flash_error = self._flash_device()
-        if flash_error:
-            return ExecutionResult(
-                success=False, execution_env="hil", error_message=flash_error
-            )
-
-        environment = self.config.execution_environment
-        logger.info("Flashed; waiting for the serial port to come back")
-        port = wait_for_serial_port(environment.serial_port, timeout_s=environment.run_timeout_s)
-        if port is None:
-            return ExecutionResult(
-                success=False,
-                execution_env="hil",
-                error_message=(
-                    f"No serial port appeared within {environment.run_timeout_s}s of flashing "
-                    f"(expected {environment.serial_port})"
-                ),
-            )
-
         try:
-            with DeviceLink(port, environment.serial_baud) as link:
+            port = self.flash_and_connect()
+            with DeviceLink(port, self.config.execution_environment.serial_baud) as link:
                 return self._measure(link, test_data)
         except DeviceError as error:
             return ExecutionResult(

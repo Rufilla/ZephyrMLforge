@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 
 from pipeline.core.config import PipelineConfig
+from pipeline.runners import hil
 from pipeline.runners.hil import HILRunner
 
 
@@ -85,3 +86,33 @@ def test_a_model_giving_every_sample_the_same_output_fails(tmp_path):
         "On-device evaluation failed: the model gave all 9 samples the same output, "
         "[0.332, 0.332, 0.332]"
     )
+
+
+def runner_with_a_build(tmp_path) -> HILRunner:
+    runner = build_runner(tmp_path, on_device_samples=3)
+    runner._shared_build_dir = tmp_path
+    elf_path = runner.west_build_dir / "zephyr" / "zephyr.elf"
+    elf_path.parent.mkdir(parents=True)
+    elf_path.touch()
+    return runner
+
+
+def test_a_failed_flash_is_reported_as_a_failed_run(tmp_path, monkeypatch):
+    runner = runner_with_a_build(tmp_path)
+    monkeypatch.setattr(runner, "_flash_device", lambda: "probe not found")
+
+    result = runner.run(tmp_path, ordered_by_class())
+
+    assert not result.success
+    assert result.error_message == "Flash failed: probe not found"
+
+
+def test_no_port_after_flashing_is_reported_as_a_failed_run(tmp_path, monkeypatch):
+    runner = runner_with_a_build(tmp_path)
+    monkeypatch.setattr(runner, "_flash_device", lambda: None)
+    monkeypatch.setattr(hil, "wait_for_serial_port", lambda port, timeout_s: None)
+
+    result = runner.run(tmp_path, ordered_by_class())
+
+    assert not result.success
+    assert result.error_message.startswith("No serial port appeared within")
