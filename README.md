@@ -322,6 +322,7 @@ Measured on one FRDM-MCXN947 with converter 3.0.0:
 |---|---|---|---|
 | 16-8 MLP, synthetic sine | 28.3 us | 13.1 us | Within 0.0079, one output step, on 21 inputs |
 | 4-layer (k,1) CNN, vibration | 8.40 ms | 0.52 ms | Identical on 36 windows, 36 correct |
+| 3-conv CNN, Fashion-MNIST | 39.5 ms | 1.25 ms | Same class on 199 of 200 images, identical on 152 |
 
 ## Firmware
 
