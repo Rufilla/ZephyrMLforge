@@ -15,6 +15,10 @@
 #include <tensorflow/lite/micro/system_setup.h>
 #include <tensorflow/lite/schema/schema_generated.h>
 
+#ifdef CONFIG_TFLM_NXP_NEUTRON
+#include <tensorflow/lite/micro/kernels/neutron/neutron.h>
+#endif
+
 namespace mlforge {
 namespace {
 
@@ -75,6 +79,12 @@ bool init(const unsigned char *model_data, uint8_t *arena, size_t arena_size)
 	resolver.AddStridedSlice();
 	resolver.AddPack();
 	resolver.AddSlice();
+
+#ifdef CONFIG_TFLM_NXP_NEUTRON
+	/*  An NPU-compiled model carries what the NPU runs as this one
+	 * custom operator; the operators above run whatever it left on the CPU. */
+	resolver.AddCustom(tflite::GetString_NEUTRON_GRAPH(), tflite::Register_NEUTRON_GRAPH());
+#endif
 
 	static tflite::MicroInterpreter static_interpreter(model, resolver, arena, arena_size);
 	interpreter = &static_interpreter;

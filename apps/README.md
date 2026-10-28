@@ -11,7 +11,7 @@ open the console, & it runs.
 | App | Does | Measured on one board |
 |---|---|---|
 | `sine_predict` | 100 predictions of sin(x) across [-π, π], each against the true value | MSE 0.0012, worst error 0.097, 33 µs each |
-| `fashion_mnist_test` | Classifies 100 Fashion-MNIST test images held in flash | 89 of 100 correct, 39.6 ms each |
+| `fashion_mnist_test` | Classifies 100 Fashion-MNIST test images held in flash, on the NPU | 89 of 100 correct, 1.25 ms each (39.6 ms on the CPU) |
 | `vibration_guess` | Runs a randomly chosen motor on the ML Vibro Sens Click, 20 times, & says which it was | 20 of 20 correct (12 balanced, 8 unbalanced) |
 
 **Before you start**
@@ -79,9 +79,13 @@ Where:
 - `--fashion` also rewrites the test images, which needs the Fashion-MNIST download
   Keras keeps in `~/.keras/datasets`
 
-The apps run the model on the CPU. The NPU-compiled `model_npu.tflite` would need
-`CONFIG_TFLM_NXP_NEUTRON=y` & the `NeutronGraph` operator registered in
-`common/inference.cpp`; that has not been done.
+`--fashion` compiles the model for the NPU before embedding it, so it needs the
+converter, `eiq-neutron-sdk` 3.0.0, matching the driver blobs; see
+[Neural accelerators](../docs/accelerators.md). The app's `prj.conf` sets
+`CONFIG_TFLM_NXP_NEUTRON=y`, & `common/inference.cpp` registers the `NeutronGraph`
+operator when it is set. The embedded model is compiled for the FRDM-MCXN947's NPU
+(`mcxn94x`) alone, so the app builds for that board only. The sine & vibration apps run
+on the CPU.
 
 ## Layout
 

@@ -9,7 +9,9 @@ models to replace; the others are left as they are:
 from __future__ import annotations
 
 import argparse
+import os
 import sys
+import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -17,7 +19,12 @@ import numpy as np
 APPS_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(APPS_DIR.parent))
 
+from pipeline.core.boards import BoardRegistry  # noqa: E402
+from pipeline.models.neutron import NeutronCompilerError, compile_for_neutron  # noqa: E402
 from pipeline.runners.firmware import FirmwareSource  # noqa: E402
+
+#  The board the apps are built for; its Neutron target comes from pyproject.toml.
+BOARD = "frdm_mcxn947"
 
 FASHION_MNIST_CLASSES = (
     "t-shirt", "trouser", "pullover", "dress", "coat",
@@ -91,6 +98,24 @@ const char *const g_class_names[kClassCount] = {{{names}}};
     print(f"Wrote {TEST_IMAGE_COUNT} test images, labels {np.bincount(labels).tolist()}")
 
 
+def neutron_target() -> str:
+    """The converter target for BOARD, from pyproject.toml."""
+    target = BoardRegistry.discover(APPS_DIR).for_board(BOARD).neutron_target
+    if target is None:
+        raise SystemExit(f"error: pyproject.toml gives {BOARD} no neutron_target")
+    return target
+
+
+def zephyr_base() -> Path:
+    """The Zephyr tree whose Neutron driver blob the converter's version must match."""
+    if not os.environ.get("ZEPHYR_BASE"):
+        raise SystemExit("error: ZEPHYR_BASE is unset; run 'source activate.sh' first")
+    path = Path(os.environ["ZEPHYR_BASE"])
+    if not path.is_dir():
+        raise SystemExit(f"error: ZEPHYR_BASE does not exist: {path}")
+    return path
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--sine", type=Path, help="model.tflite for apps/sine_predict")
@@ -111,10 +136,21 @@ def main() -> int:
         if model is None:
             continue
         source_dir = APPS_DIR / app / "src"
-        firmware.write_model(source_dir, model)
-        print(f"Wrote {model} into {source_dir}")
         if app == "fashion_mnist_test":
-            write_test_images(source_dir)
+            #  Embedded compiled for the NPU, which its prj.conf enables. Compiled
+            # & the images written first, so a failure in either leaves the old model in place.
+            with tempfile.TemporaryDirectory() as work_dir:
+                npu_model = Path(work_dir) / "model_npu.tflite"
+                try:
+                    compile_for_neutron(model, npu_model, neutron_target(), zephyr_base())
+                except NeutronCompilerError as error:
+                    raise SystemExit(f"error: {error}") from error
+                write_test_images(source_dir)
+                firmware.write_model(source_dir, npu_model)
+            print(f"Wrote {model}, compiled for the NPU, into {source_dir}")
+        else:
+            firmware.write_model(source_dir, model)
+            print(f"Wrote {model} into {source_dir}")
 
     return 0
 
